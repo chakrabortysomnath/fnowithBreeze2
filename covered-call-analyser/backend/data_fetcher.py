@@ -199,27 +199,36 @@ def get_lot_size(symbol: str) -> int:
     return size
 
 
-def _last_thursday(year: int, month: int) -> date:
-    """Return the last Thursday of the given month.
+# Quarter-end dates that trigger the Monday exception rule
+_QUARTER_ENDS: frozenset[tuple[int, int]] = frozenset({(3, 31), (6, 30), (9, 30), (12, 31)})
 
-    NSE equity options expire on the last Thursday of each month.
-    If that Thursday is a market holiday, the expiry moves to the preceding
-    Wednesday — but we don't model holidays here; the frontend shows the dates
-    as a guide and users should verify against the NSE holiday calendar.
+
+def _monthly_expiry(year: int, month: int) -> date:
+    """Return the monthly F&O expiry date for the given month.
+
+    Rule: last Tuesday of the month.
+    Exception: if that Tuesday falls on a quarter-end date
+    (Mar 31, Jun 30, Sep 30, Dec 31), the expiry moves to the
+    preceding Monday.
     """
     _, days_in_month = monthrange(year, month)
     last_day = date(year, month, days_in_month)
-    # weekday(): Mon=0 … Thu=3 … Sun=6
-    days_back = (last_day.weekday() - 3) % 7
-    return last_day - timedelta(days=days_back)
+    # weekday(): Mon=0, Tue=1, Wed=2, Thu=3, Fri=4, Sat=5, Sun=6
+    days_back = (last_day.weekday() - 1) % 7  # roll back to Tuesday
+    last_tue = last_day - timedelta(days=days_back)
+
+    if (last_tue.month, last_tue.day) in _QUARTER_ENDS:
+        return last_tue - timedelta(days=1)  # move to Monday
+
+    return last_tue
 
 
 def get_available_expiries(symbol: str) -> list[str]:
-    """Return the next 3 NSE monthly F&O expiry dates for a symbol.
+    """Return the next 3 monthly F&O expiry dates for a symbol.
 
-    The Breeze API does not expose a get_expiry_date endpoint, so expiry
-    dates are computed from the NSE rule: equity options expire on the
-    last Thursday of each calendar month.
+    Expiry rule: last Tuesday of the month, except when that Tuesday is a
+    quarter-end date (Mar 31, Jun 30, Sep 30, Dec 31) — in which case
+    the expiry is the preceding Monday.
 
     Args:
         symbol: NSE F&O symbol (used only for logging; computation is generic).
@@ -227,7 +236,7 @@ def get_available_expiries(symbol: str) -> list[str]:
     Returns:
         List of expiry dates in YYYY-MM-DD format, sorted ascending.
         Always returns exactly 3 dates covering the next 3 expiry months.
-        Example: ["2024-03-28", "2024-04-25", "2024-05-30"]
+        Example: ["2024-03-26", "2024-04-30", "2024-05-28"]
     """
     logger.info(f"Computing expiry dates for {symbol}")
     today = date.today()
@@ -235,7 +244,7 @@ def get_available_expiries(symbol: str) -> list[str]:
     year, month = today.year, today.month
 
     while len(results) < 3:
-        expiry = _last_thursday(year, month)
+        expiry = _monthly_expiry(year, month)
         if expiry >= today:
             results.append(expiry.strftime("%Y-%m-%d"))
         month += 1

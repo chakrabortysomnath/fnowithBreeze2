@@ -107,31 +107,85 @@ def test_get_available_expiries_returns_three_dates():
     print(f"\n  get_available_expiries: {result}")
 
 
-def test_get_available_expiries_are_thursdays():
-    """get_available_expiries returns dates that are all Thursdays (weekday=3)."""
+def test_get_available_expiries_are_tuesday_or_monday():
+    """Each expiry is a Tuesday, or a Monday when the last Tuesday is a quarter-end."""
     with patch.dict("os.environ", ENV):
         from backend.data_fetcher import get_available_expiries
         result = get_available_expiries("RELIANCE")
 
-    from datetime import date
+    from datetime import date, timedelta
+    from calendar import monthrange
+    QUARTER_ENDS = {(3, 31), (6, 30), (9, 30), (12, 31)}
     for d in result:
         parsed = date.fromisoformat(d)
-        assert parsed.weekday() == 3, f"{d} is not a Thursday (weekday={parsed.weekday()})"
-    print(f"\n  All expiry dates are Thursdays: {result}")
+        # Find what the last Tuesday of this expiry's month actually is
+        _, days = monthrange(parsed.year, parsed.month)
+        last_day = date(parsed.year, parsed.month, days)
+        days_back = (last_day.weekday() - 1) % 7
+        last_tue = last_day - timedelta(days=days_back)
+        if (last_tue.month, last_tue.day) in QUARTER_ENDS:
+            # Exception: expiry should be the Monday before the last Tuesday
+            expected = last_tue - timedelta(days=1)
+            assert parsed == expected, f"{d}: expected Monday {expected} (quarter-end exception)"
+            assert parsed.weekday() == 0, f"{d}: expected Monday, got weekday {parsed.weekday()}"
+        else:
+            assert parsed == last_tue, f"{d}: expected last Tuesday {last_tue}"
+            assert parsed.weekday() == 1, f"{d}: expected Tuesday, got weekday {parsed.weekday()}"
+    print(f"\n  All expiry dates pass Tuesday/Monday-on-quarter-end rule: {result}")
 
 
-def test_get_available_expiries_are_last_thursdays():
-    """Each expiry date is the last Thursday of its month."""
+def test_monthly_expiry_quarter_end_exception():
+    """_monthly_expiry moves to Monday when last Tuesday is a quarter-end."""
     with patch.dict("os.environ", ENV):
-        from backend.data_fetcher import get_available_expiries, _last_thursday
-        result = get_available_expiries("RELIANCE")
+        from backend.data_fetcher import _monthly_expiry
+        from datetime import date
 
-    from datetime import date
-    for d in result:
-        parsed = date.fromisoformat(d)
-        expected = _last_thursday(parsed.year, parsed.month)
-        assert parsed == expected, f"{d} is not the last Thursday of its month"
-    print(f"\n  All expiry dates are last-Thursday-of-month: {result}")
+        # Find a month where the last Tuesday IS a quarter-end to test the exception.
+        # We'll test by brute-force checking years 2024-2030.
+        QUARTER_ENDS = {(3, 31), (6, 30), (9, 30), (12, 31)}
+        found = False
+        for y in range(2024, 2031):
+            for m in [3, 6, 9, 12]:
+                result = _monthly_expiry(y, m)
+                # The last Tuesday of this month:
+                from calendar import monthrange
+                from datetime import timedelta
+                _, days = monthrange(y, m)
+                last_day = date(y, m, days)
+                days_back = (last_day.weekday() - 1) % 7
+                last_tue = last_day - timedelta(days=days_back)
+                if (last_tue.month, last_tue.day) in QUARTER_ENDS:
+                    # Exception should apply: result must be Monday before last_tue
+                    assert result == last_tue - timedelta(days=1), (
+                        f"{y}-{m:02d}: expected Monday {last_tue - timedelta(days=1)}, got {result}"
+                    )
+                    assert result.weekday() == 0, f"Expected Monday, got weekday {result.weekday()}"
+                    found = True
+                    print(f"\n  Quarter-end exception verified: {y}-{m:02d} last_tue={last_tue} → expiry={result}")
+        assert found, "No quarter-end Tuesday found in 2024-2030 — test data problem"
+
+
+def test_monthly_expiry_normal_case():
+    """_monthly_expiry returns last Tuesday when it is not a quarter-end."""
+    with patch.dict("os.environ", ENV):
+        from backend.data_fetcher import _monthly_expiry
+        from datetime import date, timedelta
+        from calendar import monthrange
+
+        QUARTER_ENDS = {(3, 31), (6, 30), (9, 30), (12, 31)}
+        # Check all months of 2025; for any where last Tuesday is NOT a quarter-end
+        # the result must equal the last Tuesday
+        for m in range(1, 13):
+            result = _monthly_expiry(2025, m)
+            _, days = monthrange(2025, m)
+            last_day = date(2025, m, days)
+            days_back = (last_day.weekday() - 1) % 7
+            last_tue = last_day - timedelta(days=days_back)
+            if (last_tue.month, last_tue.day) not in QUARTER_ENDS:
+                assert result == last_tue, (
+                    f"2025-{m:02d}: expected last Tuesday {last_tue}, got {result}"
+                )
+    print("\n  _monthly_expiry normal-case (non-quarter-end Tuesday): OK")
 
 
 def test_expiries_endpoint():
