@@ -11,7 +11,8 @@ Phase 2 functions:
 """
 
 import logging
-from datetime import datetime
+from calendar import monthrange
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from .breeze_client import get_session
@@ -198,76 +199,62 @@ def get_lot_size(symbol: str) -> int:
     return size
 
 
-def get_available_expiries(symbol: str) -> list[str]:
-    """Return available F&O expiry dates for a symbol from the Breeze API.
+def _last_thursday(year: int, month: int) -> date:
+    """Return the last Thursday of the given month.
 
-    Calls breeze.get_expiry_date and returns dates sorted ascending.
+    NSE equity options expire on the last Thursday of each month.
+    If that Thursday is a market holiday, the expiry moves to the preceding
+    Wednesday — but we don't model holidays here; the frontend shows the dates
+    as a guide and users should verify against the NSE holiday calendar.
+    """
+    _, days_in_month = monthrange(year, month)
+    last_day = date(year, month, days_in_month)
+    # weekday(): Mon=0 … Thu=3 … Sun=6
+    days_back = (last_day.weekday() - 3) % 7
+    return last_day - timedelta(days=days_back)
+
+
+def get_available_expiries(symbol: str) -> list[str]:
+    """Return the next 3 NSE monthly F&O expiry dates for a symbol.
+
+    The Breeze API does not expose a get_expiry_date endpoint, so expiry
+    dates are computed from the NSE rule: equity options expire on the
+    last Thursday of each calendar month.
 
     Args:
-        symbol: NSE F&O symbol, e.g. "RELIANCE".
+        symbol: NSE F&O symbol (used only for logging; computation is generic).
 
     Returns:
         List of expiry dates in YYYY-MM-DD format, sorted ascending.
+        Always returns exactly 3 dates covering the next 3 expiry months.
         Example: ["2024-03-28", "2024-04-25", "2024-05-30"]
-
-    Raises:
-        ValueError: If Breeze returns no expiry dates for the symbol.
-        RuntimeError: If the Breeze API call fails.
     """
-    breeze = get_session()
-    logger.info(f"Fetching expiry dates for {symbol}")
+    logger.info(f"Computing expiry dates for {symbol}")
+    today = date.today()
+    results: list[str] = []
+    year, month = today.year, today.month
 
-    try:
-        response = breeze.get_expiry_date(
-            stock_code=symbol,
-            exchange_code="NFO",
-            product_type="options",
-        )
-    except Exception as exc:
-        logger.error(f"Breeze get_expiry_date failed for {symbol}: {exc}")
-        raise RuntimeError(
-            f"Failed to fetch expiry dates for '{symbol}': {exc}"
-        ) from exc
+    while len(results) < 3:
+        expiry = _last_thursday(year, month)
+        if expiry >= today:
+            results.append(expiry.strftime("%Y-%m-%d"))
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
 
-    status = response.get("Status")
-    error = response.get("Error")
-    success_data = response.get("Success")
-
-    if status != 200:
-        raise ValueError(
-            f"Breeze API error fetching expiries for '{symbol}' "
-            f"(status={status}): {error or 'Unknown error'}"
-        )
-
-    if not success_data:
-        raise ValueError(
-            f"No expiry dates returned for '{symbol}'. "
-            "Confirm it is a valid NSE F&O symbol."
-        )
-
-    # Breeze returns ISO strings like "2024-03-28T00:00:00.000Z"
-    # Extract the date portion and sort
-    dates: list[str] = []
-    for entry in success_data:
-        raw = entry.get("expiry_date", "")
-        if raw:
-            dates.append(raw[:10])  # "2024-03-28"
-
-    if not dates:
-        raise ValueError(f"Could not parse any expiry dates for '{symbol}'.")
-
-    dates.sort()
-    logger.info(f"Expiries for {symbol}: {dates}")
-    return dates
+    logger.info(f"Expiries for {symbol}: {results}")
+    return results
 
 
-def _to_breeze_date(date_str: str) -> str:
-    """Convert 'YYYY-MM-DD' to Breeze option chain format 'DD-Mon-YYYY'.
+def _to_breeze_iso(date_str: str) -> str:
+    """Convert 'YYYY-MM-DD' to the ISO format Breeze option chain API expects.
 
-    Example: '2024-03-28' → '28-Mar-2024'
+    Breeze get_option_chain_quotes requires: '2024-03-28T06:00:00.000Z'
+
+    Example: '2024-03-28' → '2024-03-28T06:00:00.000Z'
     """
-    dt = datetime.strptime(date_str, "%Y-%m-%d")
-    return dt.strftime("%d-%b-%Y")
+    return f"{date_str}T06:00:00.000Z"
 
 
 def get_option_chain(symbol: str, expiry_date: str) -> list[dict]:
@@ -300,7 +287,7 @@ def get_option_chain(symbol: str, expiry_date: str) -> list[dict]:
         RuntimeError: If the Breeze API call itself fails.
     """
     breeze = get_session()
-    breeze_expiry = _to_breeze_date(expiry_date)
+    breeze_expiry = _to_breeze_iso(expiry_date)
 
     logger.info(f"Fetching option chain for {symbol} expiry={breeze_expiry}")
 

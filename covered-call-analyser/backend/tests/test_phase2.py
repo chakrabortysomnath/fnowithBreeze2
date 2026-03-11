@@ -90,82 +90,64 @@ def test_lot_size_endpoint_url_encoded_ampersand():
 # Expiry date tests
 # ---------------------------------------------------------------------------
 
-def _mock_expiry_response():
-    return {
-        "Status": 200,
-        "Error": None,
-        "Success": [
-            {"expiry_date": "2024-04-25T00:00:00.000Z"},
-            {"expiry_date": "2024-03-28T00:00:00.000Z"},
-            {"expiry_date": "2024-05-30T00:00:00.000Z"},
-        ],
-    }
-
-
-def test_get_available_expiries_returns_sorted_dates():
-    """get_available_expiries returns dates in YYYY-MM-DD format, sorted ascending."""
-    mock_session = MagicMock()
-    mock_session.get_expiry_date.return_value = _mock_expiry_response()
-
+def test_get_available_expiries_returns_three_dates():
+    """get_available_expiries returns exactly 3 future dates in YYYY-MM-DD format."""
     with patch.dict("os.environ", ENV):
-        with patch("backend.data_fetcher.get_session", return_value=mock_session):
-            from backend.data_fetcher import get_available_expiries
-            result = get_available_expiries("RELIANCE")
+        from backend.data_fetcher import get_available_expiries
+        result = get_available_expiries("RELIANCE")
 
-    assert result == ["2024-03-28", "2024-04-25", "2024-05-30"]
-    mock_session.get_expiry_date.assert_called_once_with(
-        stock_code="RELIANCE",
-        exchange_code="NFO",
-        product_type="options",
-    )
+    assert len(result) == 3
+    # Each must be a valid YYYY-MM-DD
+    from datetime import date
+    for d in result:
+        parsed = date.fromisoformat(d)
+        assert parsed >= date.today(), f"Expiry {d} is in the past"
+    # Must be sorted ascending
+    assert result == sorted(result)
     print(f"\n  get_available_expiries: {result}")
 
 
-def test_get_available_expiries_empty_response():
-    """get_available_expiries raises ValueError when Breeze returns empty Success."""
-    mock_session = MagicMock()
-    mock_session.get_expiry_date.return_value = {
-        "Status": 200, "Error": None, "Success": []
-    }
-
+def test_get_available_expiries_are_thursdays():
+    """get_available_expiries returns dates that are all Thursdays (weekday=3)."""
     with patch.dict("os.environ", ENV):
-        with patch("backend.data_fetcher.get_session", return_value=mock_session):
-            from backend.data_fetcher import get_available_expiries
-            with pytest.raises(ValueError, match="No expiry dates"):
-                get_available_expiries("RELIANCE")
+        from backend.data_fetcher import get_available_expiries
+        result = get_available_expiries("RELIANCE")
+
+    from datetime import date
+    for d in result:
+        parsed = date.fromisoformat(d)
+        assert parsed.weekday() == 3, f"{d} is not a Thursday (weekday={parsed.weekday()})"
+    print(f"\n  All expiry dates are Thursdays: {result}")
 
 
-def test_get_available_expiries_non_200():
-    """get_available_expiries raises ValueError on non-200 Breeze status."""
-    mock_session = MagicMock()
-    mock_session.get_expiry_date.return_value = {
-        "Status": 400, "Error": "Bad request", "Success": None
-    }
-
+def test_get_available_expiries_are_last_thursdays():
+    """Each expiry date is the last Thursday of its month."""
     with patch.dict("os.environ", ENV):
-        with patch("backend.data_fetcher.get_session", return_value=mock_session):
-            from backend.data_fetcher import get_available_expiries
-            with pytest.raises(ValueError, match="Breeze API error"):
-                get_available_expiries("RELIANCE")
+        from backend.data_fetcher import get_available_expiries, _last_thursday
+        result = get_available_expiries("RELIANCE")
+
+    from datetime import date
+    for d in result:
+        parsed = date.fromisoformat(d)
+        expected = _last_thursday(parsed.year, parsed.month)
+        assert parsed == expected, f"{d} is not the last Thursday of its month"
+    print(f"\n  All expiry dates are last-Thursday-of-month: {result}")
 
 
 def test_expiries_endpoint():
-    """/expiries/RELIANCE returns 200 with sorted date list."""
-    mock_session = MagicMock()
-    mock_session.get_expiry_date.return_value = _mock_expiry_response()
-
+    """/expiries/RELIANCE returns 200 with 3 sorted future dates."""
     with patch.dict("os.environ", ENV):
-        with patch("backend.data_fetcher.get_session", return_value=mock_session):
-            with patch("backend.breeze_client.get_session", return_value=mock_session):
-                from backend.main import app
-                client = TestClient(app)
-                resp = client.get("/expiries/RELIANCE")
+        with patch("backend.main.is_connected", return_value=True):
+            from backend.main import app
+            client = TestClient(app)
+            resp = client.get("/expiries/RELIANCE")
 
     assert resp.status_code == 200
     body = resp.json()
     assert body["symbol"] == "RELIANCE"
-    assert body["expiries"] == ["2024-03-28", "2024-04-25", "2024-05-30"]
-    print(f"\n  /expiries/RELIANCE: {body}")
+    assert len(body["expiries"]) == 3
+    assert body["expiries"] == sorted(body["expiries"])
+    print(f"\n  /expiries/RELIANCE: {body['expiries']}")
 
 
 # ---------------------------------------------------------------------------
@@ -219,12 +201,12 @@ def test_get_option_chain_returns_sorted_contracts():
     assert result[1]["strike_price"] == 2950.0
     assert result[2]["strike_price"] == 3000.0
 
-    # Verify date format conversion: YYYY-MM-DD → DD-Mon-YYYY
+    # Verify date format conversion: YYYY-MM-DD → ISO 8601 required by Breeze
     mock_session.get_option_chain_quotes.assert_called_once_with(
         stock_code="RELIANCE",
         exchange_code="NFO",
         product_type="options",
-        expiry_date="28-Mar-2024",
+        expiry_date="2024-03-28T06:00:00.000Z",
         right="call",
         strike_price="0",
     )
@@ -280,10 +262,11 @@ def test_option_chain_endpoint_invalid_expiry_format():
     print(f"\n  Bad expiry format correctly returned 400: {resp.json()['detail']}")
 
 
-def test_to_breeze_date_conversion():
-    """_to_breeze_date converts YYYY-MM-DD to DD-Mon-YYYY correctly."""
-    from backend.data_fetcher import _to_breeze_date
-    assert _to_breeze_date("2024-03-28") == "28-Mar-2024"
-    assert _to_breeze_date("2024-12-26") == "26-Dec-2024"
-    assert _to_breeze_date("2025-01-02") == "02-Jan-2025"
-    print("\n  _to_breeze_date conversion: OK")
+def test_to_breeze_iso_conversion():
+    """_to_breeze_iso converts YYYY-MM-DD to Breeze ISO format correctly."""
+    with patch.dict("os.environ", ENV):
+        from backend.data_fetcher import _to_breeze_iso
+        assert _to_breeze_iso("2024-03-28") == "2024-03-28T06:00:00.000Z"
+        assert _to_breeze_iso("2024-12-26") == "2024-12-26T06:00:00.000Z"
+        assert _to_breeze_iso("2025-01-02") == "2025-01-02T06:00:00.000Z"
+    print("\n  _to_breeze_iso conversion: OK")
