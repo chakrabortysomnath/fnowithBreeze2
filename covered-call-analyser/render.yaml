@@ -1,0 +1,71 @@
+# render.yaml — Render deployment configuration
+# Defines two services: FastAPI backend + Streamlit frontend.
+#
+# Deploy: Push to GitHub → Render auto-deploys on merge to main.
+# Docs: https://render.com/docs/yaml-spec
+
+services:
+  # ---------------------------------------------------------------------------
+  # Backend — FastAPI (Python web service)
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: covered-call-backend
+    runtime: python
+    region: singapore          # Change to match your user base
+    plan: free                 # Upgrade to starter for always-on (no sleep)
+
+    # Working directory is repo root; requirements.txt is in backend/
+    buildCommand: pip install -r covered-call-analyser/backend/requirements.txt
+    startCommand: >
+      uvicorn covered_call_analyser.backend.main:app
+      --host 0.0.0.0
+      --port $PORT
+
+    # Health check — Render will restart the service if this fails
+    healthCheckPath: /health
+
+    envVars:
+      # --- Required secrets: set in Render dashboard, not here ---
+      - key: BREEZE_API_KEY
+        sync: false           # Must be set manually in Render dashboard
+      - key: BREEZE_API_SECRET
+        sync: false
+      - key: BREEZE_SESSION_TOKEN
+        sync: false           # Update this daily via /refresh-session
+
+      # --- Optional defaults ---
+      - key: DEFAULT_BROKERAGE
+        value: "40.0"
+      - key: DEFAULT_STT_RATE
+        value: "0.001"
+      - key: DEFAULT_GST_RATE
+        value: "0.18"
+      - key: LOG_LEVEL
+        value: "INFO"
+
+      # --- Phase 5: QuotaGuard Static proxy (uncomment when ready) ---
+      # - key: QUOTAGUARDSTATIC_URL
+      #   sync: false
+
+  # ---------------------------------------------------------------------------
+  # Frontend — Streamlit (Python web service)
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: covered-call-frontend
+    runtime: python
+    region: singapore
+    plan: free
+
+    buildCommand: pip install -r covered-call-analyser/frontend/requirements.txt
+    startCommand: >
+      streamlit run covered-call-analyser/frontend/app.py
+      --server.port $PORT
+      --server.address 0.0.0.0
+      --server.headless true
+      --browser.gatherUsageStats false
+
+    envVars:
+      # Point frontend to the backend service URL on Render.
+      # Replace with your actual backend Render URL after first deploy.
+      - key: BACKEND_URL
+        value: https://covered-call-backend.onrender.com
