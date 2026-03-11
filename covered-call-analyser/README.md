@@ -283,7 +283,7 @@ The session token expires at midnight every day. Each morning:
 | Phase | Status | Description |
 |-------|--------|-------------|
 | 1 | ✅ Complete | Project scaffold, Breeze auth, `/health`, `/quote` |
-| 2 | 🔜 | Lot size lookup, option chain fetcher, expiry dates |
+| 2 | ✅ Complete | Lot size lookup (`/lot-size`), expiry dates (`/expiries`), option chain (`/option-chain`) |
 | 3 | 🔜 | Calculator engine, `/analyse` endpoint, unit tests |
 | 4 | 🔜 | Streamlit UI — full analysis display |
 | 5 | 🔜 | Render deployment, static IP, session refresh |

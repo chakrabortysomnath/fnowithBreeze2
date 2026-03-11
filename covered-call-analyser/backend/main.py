@@ -29,8 +29,8 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from .breeze_client import get_session, is_connected
-from .data_fetcher import get_cmp
-from .models import HealthResponse, QuoteResponse
+from .data_fetcher import get_cmp, get_lot_size, get_available_expiries, get_option_chain
+from .models import HealthResponse, QuoteResponse, LotSizeResponse, ExpiriesResponse, OptionChainResponse, OptionContract
 from .config import settings
 
 # ---------------------------------------------------------------------------
@@ -150,6 +150,139 @@ def get_quote(symbol: str) -> QuoteResponse:
 
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return QuoteResponse(symbol=decoded_symbol, cmp=cmp, timestamp=timestamp)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get(
+    "/lot-size/{symbol}",
+    response_model=LotSizeResponse,
+    summary="Get F&O lot size for a symbol",
+    description=(
+        "Returns the NSE F&O lot size for the given symbol from the built-in "
+        "lot size table. Lot sizes are set by SEBI and change periodically."
+    ),
+    tags=["Market Data"],
+)
+def lot_size(symbol: str) -> LotSizeResponse:
+    """Return F&O lot size for an NSE symbol.
+
+    Args:
+        symbol: NSE F&O symbol, e.g. RELIANCE, M%26M, NIFTY.
+
+    Returns:
+        LotSizeResponse with symbol and lot_size.
+
+    Raises:
+        404: Symbol not found in the lot size table.
+    """
+    decoded = symbol.replace("%26", "&").upper()
+    logger.info(f"GET /lot-size/{decoded}")
+    try:
+        size = get_lot_size(decoded)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return LotSizeResponse(symbol=decoded, lot_size=size)
+
+
+@app.get(
+    "/expiries/{symbol}",
+    response_model=ExpiriesResponse,
+    summary="List available F&O expiry dates for a symbol",
+    description=(
+        "Fetches available monthly expiry dates from the Breeze API for the "
+        "given NSE F&O symbol. Dates are returned in YYYY-MM-DD format, "
+        "sorted ascending."
+    ),
+    tags=["Market Data"],
+)
+def expiries(symbol: str) -> ExpiriesResponse:
+    """Return available option expiry dates for a symbol.
+
+    Args:
+        symbol: NSE F&O symbol, e.g. RELIANCE.
+
+    Returns:
+        ExpiriesResponse with symbol and list of expiry dates (YYYY-MM-DD).
+
+    Raises:
+        404: No expiry dates found for the symbol.
+        503: Breeze session unavailable.
+    """
+    decoded = symbol.replace("%26", "&").upper()
+    logger.info(f"GET /expiries/{decoded}")
+    try:
+        dates = get_available_expiries(decoded)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        logger.exception(f"Unexpected error fetching expiries for {decoded}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {exc}")
+    return ExpiriesResponse(symbol=decoded, expiries=dates)
+
+
+@app.get(
+    "/option-chain/{symbol}",
+    response_model=OptionChainResponse,
+    summary="Get call option chain for a symbol and expiry",
+    description=(
+        "Fetches all available call (CE) option strikes for the given NSE F&O "
+        "symbol and expiry date. Use /expiries/{symbol} to get valid expiry dates. "
+        "expiry query parameter must be in YYYY-MM-DD format."
+    ),
+    tags=["Market Data"],
+)
+def option_chain(
+    symbol: str,
+    expiry: str = Query(
+        ...,
+        description="Expiry date in YYYY-MM-DD format. Use /expiries/{symbol} to list dates.",
+        examples=["2024-03-28"],
+    ),
+) -> OptionChainResponse:
+    """Return the call option chain for a symbol and expiry date.
+
+    Args:
+        symbol: NSE F&O symbol, e.g. RELIANCE.
+        expiry: Expiry date in YYYY-MM-DD format.
+
+    Returns:
+        OptionChainResponse with symbol, expiry_date, and list of OptionContract.
+
+    Raises:
+        400: expiry date format is invalid.
+        404: No option data found.
+        503: Breeze session unavailable.
+    """
+    decoded = symbol.replace("%26", "&").upper()
+    logger.info(f"GET /option-chain/{decoded}?expiry={expiry}")
+
+    # Validate expiry format
+    try:
+        from datetime import datetime
+        datetime.strptime(expiry, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid expiry date format '{expiry}'. Use YYYY-MM-DD.",
+        )
+
+    try:
+        contracts_raw = get_option_chain(decoded, expiry)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        logger.exception(f"Unexpected error fetching option chain for {decoded}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {exc}")
+
+    contracts = [OptionContract(**c) for c in contracts_raw]
+    return OptionChainResponse(symbol=decoded, expiry_date=expiry, options=contracts)
 
 
 # ---------------------------------------------------------------------------

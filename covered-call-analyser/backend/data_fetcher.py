@@ -2,12 +2,12 @@
 data_fetcher.py — Market data retrieval from ICICI Breeze API.
 
 Phase 1 functions:
-    get_cmp(symbol)         — Fetch last traded price for an NSE equity
+    get_cmp(symbol)                        — Fetch last traded price for an NSE equity
 
-Phase 2 functions (stubs, implemented in Phase 2):
-    get_lot_size(symbol)    — Lookup F&O lot size
-    get_option_chain(...)   — Fetch call option chain for a given expiry
-    get_available_expiries(symbol) — List available monthly expiry dates
+Phase 2 functions:
+    get_lot_size(symbol)                   — Lookup F&O lot size from built-in table
+    get_available_expiries(symbol)         — List available monthly expiry dates via Breeze
+    get_option_chain(symbol, expiry_date)  — Fetch call option chain for a given expiry
 """
 
 import logging
@@ -17,6 +17,66 @@ from typing import Optional
 from .breeze_client import get_session
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — NSE F&O lot size table
+#
+# Source: NSE circular (revised periodically by SEBI).
+# Last updated: March 2025.  If a symbol is missing, raise ValueError so
+# the caller can surface a clear error rather than silently using a wrong lot.
+# ---------------------------------------------------------------------------
+
+_LOT_SIZES: dict[str, int] = {
+    "RELIANCE":    250,
+    "TCS":         150,
+    "INFY":        300,
+    "HDFCBANK":    550,
+    "ICICIBANK":   700,
+    "SBIN":       1500,
+    "BHARTIARTL":  950,
+    "ITC":        3200,
+    "KOTAKBANK":   400,
+    "LT":          150,
+    "HINDUNILVR":  300,
+    "AXISBANK":   1200,
+    "BAJFINANCE":  125,
+    "WIPRO":      1500,
+    "HCLTECH":     700,
+    "M&M":         700,
+    "TITAN":       375,
+    "ULTRACEMCO":  100,
+    "NESTLEIND":    50,
+    "SUNPHARMA":   700,
+    "POWERGRID":  4700,
+    "ONGC":       3850,
+    "NTPC":       3750,
+    "ADANIENT":    625,
+    "MARUTI":      100,
+    "TATASTEEL":  5500,
+    "TATAMOTORS": 1425,
+    "JSWSTEEL":   1350,
+    "COALINDIA":  4200,
+    "DIVISLAB":    150,
+    "DRREDDY":     125,
+    "CIPLA":       650,
+    "APOLLOHOSP":  125,
+    "ASIANPAINT":  200,
+    "GRASIM":      475,
+    "TECHM":       600,
+    "BAJAJFINSV":  500,
+    "HINDALCO":   2150,
+    "INDUSINDBK":  500,
+    "SBILIFE":     750,
+    "HDFCLIFE":   1100,
+    "BPCL":       1800,
+    "HEROMOTOCO":  300,
+    "EICHERMOT":   175,
+    "VEDL":       3100,
+    "NIFTY":        25,
+    "BANKNIFTY":    15,
+    "FINNIFTY":     40,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -112,19 +172,204 @@ def get_cmp(symbol: str) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 stubs — implemented fully in data_fetcher.py during Phase 2
+# Phase 2 — Lot size, expiries, option chain
 # ---------------------------------------------------------------------------
 
-def get_lot_size(symbol: str) -> int:  # pragma: no cover
-    """Return the F&O lot size for a symbol. (Implemented in Phase 2.)"""
-    raise NotImplementedError("get_lot_size is implemented in Phase 2")
+def get_lot_size(symbol: str) -> int:
+    """Return the F&O lot size for a symbol from the built-in NSE lot size table.
+
+    Args:
+        symbol: NSE F&O symbol, e.g. "RELIANCE", "M&M", "NIFTY".
+
+    Returns:
+        Lot size as an integer (number of shares per lot).
+
+    Raises:
+        ValueError: If the symbol is not in the lot size table.
+    """
+    key = symbol.upper()
+    size = _LOT_SIZES.get(key)
+    if size is None:
+        raise ValueError(
+            f"Lot size not found for '{symbol}'. "
+            f"Supported symbols: {sorted(_LOT_SIZES.keys())}"
+        )
+    logger.info(f"Lot size for {symbol}: {size}")
+    return size
 
 
-def get_option_chain(symbol: str, expiry_date: str) -> list[dict]:  # pragma: no cover
-    """Return the call option chain for symbol + expiry. (Implemented in Phase 2.)"""
-    raise NotImplementedError("get_option_chain is implemented in Phase 2")
+def get_available_expiries(symbol: str) -> list[str]:
+    """Return available F&O expiry dates for a symbol from the Breeze API.
+
+    Calls breeze.get_expiry_date and returns dates sorted ascending.
+
+    Args:
+        symbol: NSE F&O symbol, e.g. "RELIANCE".
+
+    Returns:
+        List of expiry dates in YYYY-MM-DD format, sorted ascending.
+        Example: ["2024-03-28", "2024-04-25", "2024-05-30"]
+
+    Raises:
+        ValueError: If Breeze returns no expiry dates for the symbol.
+        RuntimeError: If the Breeze API call fails.
+    """
+    breeze = get_session()
+    logger.info(f"Fetching expiry dates for {symbol}")
+
+    try:
+        response = breeze.get_expiry_date(
+            stock_code=symbol,
+            exchange_code="NFO",
+            product_type="options",
+        )
+    except Exception as exc:
+        logger.error(f"Breeze get_expiry_date failed for {symbol}: {exc}")
+        raise RuntimeError(
+            f"Failed to fetch expiry dates for '{symbol}': {exc}"
+        ) from exc
+
+    status = response.get("Status")
+    error = response.get("Error")
+    success_data = response.get("Success")
+
+    if status != 200:
+        raise ValueError(
+            f"Breeze API error fetching expiries for '{symbol}' "
+            f"(status={status}): {error or 'Unknown error'}"
+        )
+
+    if not success_data:
+        raise ValueError(
+            f"No expiry dates returned for '{symbol}'. "
+            "Confirm it is a valid NSE F&O symbol."
+        )
+
+    # Breeze returns ISO strings like "2024-03-28T00:00:00.000Z"
+    # Extract the date portion and sort
+    dates: list[str] = []
+    for entry in success_data:
+        raw = entry.get("expiry_date", "")
+        if raw:
+            dates.append(raw[:10])  # "2024-03-28"
+
+    if not dates:
+        raise ValueError(f"Could not parse any expiry dates for '{symbol}'.")
+
+    dates.sort()
+    logger.info(f"Expiries for {symbol}: {dates}")
+    return dates
 
 
-def get_available_expiries(symbol: str) -> list[str]:  # pragma: no cover
-    """Return available monthly expiry dates for a symbol. (Implemented in Phase 2.)"""
-    raise NotImplementedError("get_available_expiries is implemented in Phase 2")
+def _to_breeze_date(date_str: str) -> str:
+    """Convert 'YYYY-MM-DD' to Breeze option chain format 'DD-Mon-YYYY'.
+
+    Example: '2024-03-28' → '28-Mar-2024'
+    """
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    return dt.strftime("%d-%b-%Y")
+
+
+def get_option_chain(symbol: str, expiry_date: str) -> list[dict]:
+    """Fetch the call option chain for a symbol and expiry date.
+
+    Calls breeze.get_option_chain_quotes with right='call' to retrieve all
+    available call strikes for covered call analysis.
+
+    Args:
+        symbol:      NSE F&O symbol, e.g. "RELIANCE".
+        expiry_date: Expiry date in YYYY-MM-DD format, e.g. "2024-03-28".
+
+    Returns:
+        List of dicts, each representing one call option contract:
+        [
+            {
+                "strike_price": 2900.0,
+                "option_type": "CE",
+                "ltp": 45.50,
+                "iv": 18.3,          # may be None if not returned by Breeze
+                "open_interest": 125000,
+                "volume": 34000,
+            },
+            ...
+        ]
+        Sorted by strike_price ascending.
+
+    Raises:
+        ValueError: If no option data is returned for this symbol/expiry.
+        RuntimeError: If the Breeze API call itself fails.
+    """
+    breeze = get_session()
+    breeze_expiry = _to_breeze_date(expiry_date)
+
+    logger.info(f"Fetching option chain for {symbol} expiry={breeze_expiry}")
+
+    try:
+        response = breeze.get_option_chain_quotes(
+            stock_code=symbol,
+            exchange_code="NFO",
+            product_type="options",
+            expiry_date=breeze_expiry,
+            right="call",
+            strike_price="0",     # 0 = fetch all strikes
+        )
+    except Exception as exc:
+        logger.error(f"Breeze get_option_chain_quotes failed for {symbol}: {exc}")
+        raise RuntimeError(
+            f"Failed to fetch option chain for '{symbol}' expiry {expiry_date}: {exc}"
+        ) from exc
+
+    status = response.get("Status")
+    error = response.get("Error")
+    success_data = response.get("Success")
+
+    if status != 200:
+        raise ValueError(
+            f"Breeze API error for option chain '{symbol}' expiry {expiry_date} "
+            f"(status={status}): {error or 'Unknown error'}"
+        )
+
+    if not success_data:
+        raise ValueError(
+            f"No option chain data for '{symbol}' expiry {expiry_date}. "
+            "Confirm the expiry date is valid (use /expiries/{symbol} to list dates)."
+        )
+
+    contracts: list[dict] = []
+    for raw in success_data:
+        # Breeze field names vary slightly; try both known variants
+        strike_raw = raw.get("strike_price") or raw.get("strikePrice")
+        ltp_raw    = raw.get("ltp") or raw.get("last_traded_price")
+        oi_raw     = raw.get("open_interest") or raw.get("openInterest")
+        iv_raw     = raw.get("implied_volatility") or raw.get("iv")
+        vol_raw    = raw.get("volume") or raw.get("total_quantity_traded")
+
+        try:
+            strike = float(strike_raw) if strike_raw is not None else None
+            ltp    = float(ltp_raw)    if ltp_raw    is not None else None
+        except (TypeError, ValueError):
+            logger.warning(f"Skipping malformed option row for {symbol}: {raw}")
+            continue
+
+        if strike is None or ltp is None:
+            logger.warning(f"Missing strike/ltp in option row for {symbol}: {raw}")
+            continue
+
+        contracts.append({
+            "strike_price":   strike,
+            "option_type":    "CE",
+            "ltp":            ltp,
+            "iv":             float(iv_raw)  if iv_raw  is not None else None,
+            "open_interest":  int(oi_raw)    if oi_raw  is not None else None,
+            "volume":         int(vol_raw)   if vol_raw is not None else None,
+        })
+
+    if not contracts:
+        raise ValueError(
+            f"Option chain returned no parseable contracts for '{symbol}' "
+            f"expiry {expiry_date}."
+        )
+
+    contracts.sort(key=lambda c: c["strike_price"])
+    logger.info(f"Option chain for {symbol} {expiry_date}: {len(contracts)} strikes")
+    return contracts
