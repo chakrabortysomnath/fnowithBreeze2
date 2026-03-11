@@ -133,27 +133,122 @@ pytest backend/tests/test_phase1.py::test_live_cmp_mnm -v -s
 
 ---
 
-## Deploying to Render
+## Deploying to Render Web Services
 
-### First Deploy
+There are two ways to deploy. **Option A (Blueprint)** is faster if you want both services created automatically. **Option B (Manual)** gives you more control.
 
-1. Push this repo to GitHub.
-2. Log in to [Render](https://render.com).
-3. Click **New → Blueprint** and select your GitHub repo.
-4. Render reads `render.yaml` and creates both services automatically.
-5. In the Render dashboard, set the secret environment variables for the **backend** service:
-   - `BREEZE_API_KEY`
-   - `BREEZE_API_SECRET`
-   - `BREEZE_SESSION_TOKEN`
-6. Update `BACKEND_URL` on the frontend service to match your backend's Render URL.
-7. Trigger a manual deploy if needed.
+---
 
-### Updating BREEZE_SESSION_TOKEN on Render
+### Option A — Blueprint deploy (recommended)
 
-Each morning:
-1. Render dashboard → covered-call-backend → Environment.
-2. Edit `BREEZE_SESSION_TOKEN` → paste new token → Save.
-3. Render will redeploy automatically.
+A Blueprint reads `render.yaml` and creates both services in one shot.
+
+1. Push this repo to GitHub (confirm the `render.yaml` is at the repo root level).
+2. Go to [https://dashboard.render.com](https://dashboard.render.com) → click **New** → **Blueprint**.
+3. Connect your GitHub account if not already done → select this repository.
+4. Render will detect `render.yaml` and show you a preview of two services:
+   - `covered-call-backend`
+   - `covered-call-frontend`
+5. Click **Apply** — Render starts building both.
+6. **The build will succeed but the backend will crash** on first start because the three secret env vars are not set yet. That is expected. Continue to step 7.
+7. Go to **Dashboard → covered-call-backend → Environment**.
+8. Click **Add Environment Variable** and add each of the following:
+
+   | Key | Value |
+   |-----|-------|
+   | `BREEZE_API_KEY` | your API key from ICICI Direct developer portal |
+   | `BREEZE_API_SECRET` | your API secret |
+   | `BREEZE_SESSION_TOKEN` | today's session token (see section below) |
+
+9. Click **Save Changes** — Render auto-redeploys the backend.
+10. Wait for the backend deploy to finish. Click the backend service URL (e.g. `https://covered-call-backend.onrender.com`) and confirm you see the API docs page.
+11. Copy that backend URL. Go to **Dashboard → covered-call-frontend → Environment**.
+12. Edit `BACKEND_URL` → paste the exact backend URL (no trailing slash).
+13. Click **Save Changes** — Render redeploys the frontend.
+14. Open the frontend URL — you should see the health badge turn green.
+
+---
+
+### Option B — Manual service creation
+
+Use this if you want to create services one at a time without a Blueprint.
+
+#### Step 1 — Create the backend service
+
+1. Dashboard → **New** → **Web Service**.
+2. Connect your GitHub repo → select it.
+3. Fill in:
+
+   | Field | Value |
+   |-------|-------|
+   | **Name** | `covered-call-backend` |
+   | **Region** | Singapore (or closest to you) |
+   | **Branch** | `main` |
+   | **Runtime** | `Python 3` |
+   | **Build Command** | `pip install -r covered-call-analyser/backend/requirements.txt` |
+   | **Start Command** | `cd covered-call-analyser && uvicorn backend.main:app --host 0.0.0.0 --port $PORT` |
+   | **Plan** | Free (or Starter for always-on) |
+
+4. Scroll down to **Environment Variables** → add:
+
+   | Key | Value |
+   |-----|-------|
+   | `BREEZE_API_KEY` | your key |
+   | `BREEZE_API_SECRET` | your secret |
+   | `BREEZE_SESSION_TOKEN` | today's token |
+   | `DEFAULT_BROKERAGE` | `40.0` |
+   | `DEFAULT_STT_RATE` | `0.001` |
+   | `DEFAULT_GST_RATE` | `0.18` |
+   | `LOG_LEVEL` | `INFO` |
+
+5. Click **Create Web Service**. Wait for the deploy to complete.
+6. Confirm: visit `https://covered-call-backend.onrender.com/health` — you should see `{"status":"ok","breeze_connected":true}`.
+
+#### Step 2 — Create the frontend service
+
+1. Dashboard → **New** → **Web Service**.
+2. Same GitHub repo.
+3. Fill in:
+
+   | Field | Value |
+   |-------|-------|
+   | **Name** | `covered-call-frontend` |
+   | **Region** | Singapore (match backend) |
+   | **Branch** | `main` |
+   | **Runtime** | `Python 3` |
+   | **Build Command** | `pip install -r covered-call-analyser/frontend/requirements.txt` |
+   | **Start Command** | `streamlit run covered-call-analyser/frontend/app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true --browser.gatherUsageStats false` |
+   | **Plan** | Free |
+
+4. Environment Variables → add:
+
+   | Key | Value |
+   |-----|-------|
+   | `BACKEND_URL` | `https://covered-call-backend.onrender.com` |
+
+5. Click **Create Web Service**.
+
+---
+
+### Updating BREEZE_SESSION_TOKEN daily (on Render)
+
+The session token expires at midnight every day. Each morning:
+
+1. Generate a new token (see **Generating a Breeze Session Token** section above).
+2. Dashboard → **covered-call-backend** → **Environment**.
+3. Find `BREEZE_SESSION_TOKEN` → click **Edit** → paste the new token → **Save**.
+4. Render automatically redeploys (takes ~60 seconds on free tier).
+5. Confirm: hit `/health` again — `breeze_connected` should be `true`.
+
+**Faster alternative (Phase 5):** Call the `/refresh-session` endpoint directly — no redeploy needed.
+
+---
+
+### Free tier — important gotchas
+
+- **Free services sleep after 15 minutes of inactivity.** The first request after sleep takes 30–60 seconds. Upgrade to Starter (£7/mo) if this is unacceptable.
+- **Build minutes are limited on free.** If a build fails due to timeout, retry manually via Dashboard → service → **Manual Deploy**.
+- **Both services must be in the same region** to keep latency low between frontend and backend calls.
 
 ---
 

@@ -1,7 +1,18 @@
 # render.yaml — Render deployment configuration
 # Defines two services: FastAPI backend + Streamlit frontend.
 #
-# Deploy: Push to GitHub → Render auto-deploys on merge to main.
+# HOW TO USE:
+#   Option A (Blueprint — recommended):
+#     Render dashboard → New → Blueprint → connect repo → Render reads this file.
+#
+#   Option B (Manual):
+#     Create each service manually in the Render dashboard using the
+#     buildCommand and startCommand values below.
+#
+# IMPORTANT: After deploy, you MUST manually set the three secret env vars
+# (BREEZE_API_KEY, BREEZE_API_SECRET, BREEZE_SESSION_TOKEN) in the Render
+# dashboard — they are marked sync:false so they are never stored in git.
+#
 # Docs: https://render.com/docs/yaml-spec
 
 services:
@@ -11,29 +22,30 @@ services:
   - type: web
     name: covered-call-backend
     runtime: python
-    region: singapore          # Change to match your user base
-    plan: free                 # Upgrade to starter for always-on (no sleep)
+    region: singapore          # Options: oregon, frankfurt, singapore, ohio
+    plan: free                 # Free tier sleeps after 15 min inactivity.
+                               # Upgrade to 'starter' (£7/mo) for always-on.
 
-    # Working directory is repo root; requirements.txt is in backend/
+    # cd into the subdirectory so Python sees backend/ as a package.
+    # The hyphen in 'covered-call-analyser' prevents using it as a Python
+    # module name directly, so we cd in first.
     buildCommand: pip install -r covered-call-analyser/backend/requirements.txt
-    startCommand: >
-      uvicorn covered_call_analyser.backend.main:app
-      --host 0.0.0.0
-      --port $PORT
+    startCommand: cd covered-call-analyser && uvicorn backend.main:app --host 0.0.0.0 --port $PORT
 
-    # Health check — Render will restart the service if this fails
+    # Render hits this path to verify the service started correctly.
     healthCheckPath: /health
 
     envVars:
-      # --- Required secrets: set in Render dashboard, not here ---
+      # --- SECRETS: set these manually in the Render dashboard ---
+      # Dashboard → covered-call-backend → Environment → Add Env Var
       - key: BREEZE_API_KEY
-        sync: false           # Must be set manually in Render dashboard
+        sync: false
       - key: BREEZE_API_SECRET
         sync: false
       - key: BREEZE_SESSION_TOKEN
-        sync: false           # Update this daily via /refresh-session
+        sync: false           # Regenerate daily; update here each morning
 
-      # --- Optional defaults ---
+      # --- Non-secret defaults (committed safely in this file) ---
       - key: DEFAULT_BROKERAGE
         value: "40.0"
       - key: DEFAULT_STT_RATE
@@ -65,7 +77,8 @@ services:
       --browser.gatherUsageStats false
 
     envVars:
-      # Point frontend to the backend service URL on Render.
-      # Replace with your actual backend Render URL after first deploy.
+      # After the backend deploys, copy its Render URL here.
+      # Format: https://covered-call-backend.onrender.com
+      # (Render assigns this automatically — check the backend service dashboard)
       - key: BACKEND_URL
         value: https://covered-call-backend.onrender.com
