@@ -13,8 +13,8 @@ Phase 2 endpoints (added in Phase 2):
 Phase 3 endpoints (added in Phase 3):
     POST /analyse
 
-Phase 5 endpoints (added in Phase 5):
-    POST /refresh-session
+Phase 5 endpoints:
+    POST /refresh-session — hot-swap the Breeze session token (no redeploy needed)
 
 Run locally:
     cd covered-call-analyser
@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from .breeze_client import get_session, is_connected
+from .breeze_client import get_session, is_connected, refresh_session
 from .calculator import analyse_covered_call
 from .data_fetcher import (
     get_cmp, get_lot_size, get_available_expiries, get_option_chain,
@@ -40,6 +40,7 @@ from .models import (
     ExpiriesResponse, OptionChainResponse, OptionContract,
     AnalyseRequest, AnalyseResponse, PositionDetails, StrikeAnalysis,
     ChargesBreakdown, PayoffPoint,
+    RefreshSessionRequest, RefreshSessionResponse,
 )
 from .config import settings
 
@@ -475,6 +476,57 @@ def analyse(req: AnalyseRequest) -> AnalyseResponse:
         lot_size=result["lot_size"],
         position=position,
         strikes=strikes,
+        timestamp=timestamp,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post(
+    "/refresh-session",
+    response_model=RefreshSessionResponse,
+    summary="Hot-swap the Breeze session token",
+    description=(
+        "Replaces the current Breeze API session with a new one using the provided "
+        "daily session token. Use this each morning instead of redeploying the service. "
+        "\n\n**How to get a fresh token:**\n"
+        "1. Visit `https://api.icicidirect.com/apiuser/login?api_key=YOUR_API_KEY`\n"
+        "2. Log in with ICICI Direct credentials + TOTP (Google Authenticator)\n"
+        "3. Copy the `apisession=` value from the redirect URL\n"
+        "4. POST it here"
+    ),
+    tags=["Session"],
+)
+def refresh_session_endpoint(req: RefreshSessionRequest) -> RefreshSessionResponse:
+    """Replace the live Breeze session with a freshly authenticated one.
+
+    Args:
+        req: RefreshSessionRequest containing the new session token.
+
+    Returns:
+        RefreshSessionResponse confirming success and timestamp.
+
+    Raises:
+        400: session_token is empty.
+        503: The new token could not authenticate with Breeze.
+    """
+    logger.info("POST /refresh-session called")
+    try:
+        refresh_session(req.session_token)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to authenticate with new token: {exc}",
+        )
+
+    timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return RefreshSessionResponse(
+        status="ok",
+        message="Breeze session refreshed successfully.",
         timestamp=timestamp,
     )
 

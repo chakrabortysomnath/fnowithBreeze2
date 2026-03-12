@@ -8,11 +8,16 @@ Session Token Note:
     Breeze session tokens expire daily. You must generate a fresh token
     each morning via the ICICI Direct login/TOTP flow and either:
       a) Restart the Render service with the new BREEZE_SESSION_TOKEN env var, OR
-      b) Call POST /refresh-session (added in Phase 5) with the new token.
+      b) Call POST /refresh-session (Phase 5) with the new token — no redeploy needed.
+
+Static IP Proxy (Phase 5):
+    ICICI Breeze may require a whitelisted outbound IP. Render's free tier uses
+    dynamic IPs, so set QUOTAGUARDSTATIC_URL to a QuotaGuard Static proxy URL.
+    All Breeze API calls will be routed through that proxy automatically.
 """
 
 import logging
-import sys
+import os
 from typing import Optional
 
 from breeze_connect import BreezeConnect
@@ -37,10 +42,39 @@ def get_session() -> BreezeConnect:
     return _session
 
 
-def _initialise_session() -> BreezeConnect:
+def _configure_proxy() -> None:
+    """Set HTTP/HTTPS proxy environment variables from QUOTAGUARDSTATIC_URL.
+
+    When QUOTAGUARDSTATIC_URL is configured, all outbound requests made by
+    the breeze_connect library (which uses `requests` internally) are routed
+    through that proxy. This provides a static outbound IP that can be
+    whitelisted on the ICICI Breeze developer portal.
+
+    Calling this repeatedly is safe — it simply overwrites the env vars.
+    """
+    proxy_url = settings.QUOTAGUARDSTATIC_URL
+    if proxy_url:
+        os.environ["HTTP_PROXY"]  = proxy_url
+        os.environ["HTTPS_PROXY"] = proxy_url
+        logger.info(
+            "QuotaGuard Static proxy configured — outbound requests will use "
+            f"{proxy_url[:proxy_url.index('@') + 1]}***"  # log host, mask credentials
+            if "@" in proxy_url else f"proxy: {proxy_url}"
+        )
+    else:
+        # Remove any stale proxy vars so a server restart without the setting
+        # doesn't accidentally keep routing through an old proxy.
+        os.environ.pop("HTTP_PROXY",  None)
+        os.environ.pop("HTTPS_PROXY", None)
+
+
+def _initialise_session(session_token_override: Optional[str] = None) -> BreezeConnect:
     """Create and authenticate a new BreezeConnect session.
 
-    Uses credentials from config.py (read from environment variables).
+    Args:
+        session_token_override: If provided, use this token instead of the
+            one stored in settings. Used by refresh_session() to hot-swap
+            the token without restarting the server.
 
     Returns:
         An authenticated BreezeConnect instance.
@@ -48,18 +82,18 @@ def _initialise_session() -> BreezeConnect:
     Raises:
         RuntimeError: Wraps any exception raised during auth, with a helpful message.
     """
-    logger.info("Initialising Breeze API session...")
+    _configure_proxy()
+
+    token = session_token_override or settings.BREEZE_SESSION_TOKEN
+    logger.info("Initialising Breeze API session%s…",
+                " (token override)" if session_token_override else "")
 
     try:
         breeze = BreezeConnect(api_key=settings.BREEZE_API_KEY)
-
-        # generate_session authenticates using the API secret and the daily
-        # session token obtained from the ICICI Direct login flow.
         breeze.generate_session(
             api_secret=settings.BREEZE_API_SECRET,
-            session_token=settings.BREEZE_SESSION_TOKEN,
+            session_token=token,
         )
-
         logger.info("Breeze API session initialised successfully.")
         return breeze
 
@@ -78,24 +112,34 @@ def _initialise_session() -> BreezeConnect:
 def refresh_session(new_session_token: str) -> BreezeConnect:
     """Replace the current session with a new one using a fresh session token.
 
-    Called by the POST /refresh-session endpoint (Phase 5).
-    Use this each morning after generating a new token via the ICICI Direct flow.
+    Called by POST /refresh-session each morning after generating a new token
+    via the ICICI Direct login/TOTP flow. Does not require a server restart.
 
     Args:
         new_session_token: Fresh session token from today's ICICI Direct login.
 
     Returns:
         The new authenticated BreezeConnect session.
+
+    Raises:
+        ValueError: If new_session_token is empty.
+        RuntimeError: If the new session cannot be authenticated.
     """
+    if not new_session_token or not new_session_token.strip():
+        raise ValueError("new_session_token must not be empty.")
+
     global _session
+    logger.info("Refreshing Breeze session with new token…")
 
-    logger.info("Refreshing Breeze session with new token...")
-
-    # Temporarily override the setting in-memory (does not write to .env)
-    settings.__dict__["BREEZE_SESSION_TOKEN"] = new_session_token
-
-    _session = None  # force re-initialisation on next get_session() call
-    return get_session()
+    # Reset singleton so _initialise_session builds a fresh connection.
+    # We do this before the new session is ready so that any concurrent
+    # requests that call get_session() while we refresh will trigger a
+    # new build rather than using the stale/expired session.
+    _session = None
+    new_session = _initialise_session(session_token_override=new_session_token.strip())
+    _session = new_session
+    logger.info("Breeze session refreshed successfully.")
+    return _session
 
 
 def is_connected() -> bool:

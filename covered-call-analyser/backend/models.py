@@ -234,3 +234,34 @@ class AnalyseResponse(BaseModel):
     position: PositionDetails
     strikes: list[StrikeAnalysis]
     timestamp: str
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — Session refresh
+# ---------------------------------------------------------------------------
+
+class RefreshSessionRequest(BaseModel):
+    """Request body for POST /refresh-session."""
+
+    session_token: str = Field(
+        description=(
+            "Fresh daily session token obtained from the ICICI Direct login flow. "
+            "Generate at: https://api.icicidirect.com/apiuser/login?api_key=YOUR_KEY"
+        )
+    )
+
+
+class RefreshSessionResponse(BaseModel):
+    """Response model for POST /refresh-session."""
+
+    status: str = Field(
+        description="'ok' if the session was refreshed successfully.",
+        examples=["ok"],
+    )
+    message: str = Field(
+        description="Human-readable confirmation message.",
+        examples=["Breeze session refreshed successfully."],
+    )
+    timestamp: str = Field(
+        description="UTC timestamp of the refresh (ISO 8601).",
+    )
