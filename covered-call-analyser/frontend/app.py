@@ -15,6 +15,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from pdf_report import generate_pdf
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000").rstrip("/")
@@ -312,6 +314,18 @@ with left:
             hide_index=True,
             height=185,
         )
+
+        # PDF download
+        try:
+            pdf_bytes = generate_pdf([res], title=f"{res['symbol']} — Covered Call Report")
+            st.download_button(
+                label="Download PDF report",
+                data=pdf_bytes,
+                file_name=f"{res['symbol']}_covered_call.pdf",
+                mime="application/pdf",
+            )
+        except Exception as exc:
+            st.warning(f"PDF generation failed: {exc}")
 
     else:
         # Placeholder table while no result yet

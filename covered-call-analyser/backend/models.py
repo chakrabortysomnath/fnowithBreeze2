@@ -265,3 +265,54 @@ class RefreshSessionResponse(BaseModel):
     timestamp: str = Field(
         description="UTC timestamp of the refresh (ISO 8601).",
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — Watchlist
+# ---------------------------------------------------------------------------
+
+class WatchlistItem(BaseModel):
+    """One symbol+expiry entry in a watchlist analysis request."""
+
+    symbol: str = Field(description="NSE F&O symbol, e.g. RELIANCE.")
+    expiry_date: str = Field(description="Option expiry in YYYY-MM-DD format.")
+    already_holds: bool = Field(default=False)
+    quantity_held: int = Field(default=0, ge=0)
+    avg_purchase_price: float = Field(default=0.0, ge=0.0)
+    brokerage: float = Field(default=40.0, gt=0)
+    stt_rate: float = Field(default=0.001, gt=0)
+    gst_rate: float = Field(default=0.18, gt=0)
+
+
+class WatchlistRequest(BaseModel):
+    """Request body for POST /analyse-watchlist."""
+
+    items: list[WatchlistItem] = Field(
+        min_length=1, max_length=20,
+        description="1–20 watchlist items to analyse.",
+    )
+
+
+class WatchlistResultItem(BaseModel):
+    """Analysis outcome for one symbol in a watchlist run."""
+
+    symbol: str
+    status: str = Field(description="'ok' if analysis succeeded, 'error' otherwise.")
+    result: Optional[AnalyseResponse] = Field(
+        default=None,
+        description="Full analysis result (present only when status='ok').",
+    )
+    error: Optional[str] = Field(
+        default=None,
+        description="Error message (present only when status='error').",
+    )
+
+
+class WatchlistResponse(BaseModel):
+    """Response model for POST /analyse-watchlist."""
+
+    results: list[WatchlistResultItem]
+    total: int = Field(description="Total number of items submitted.")
+    succeeded: int = Field(description="Number of items that analysed successfully.")
+    failed: int = Field(description="Number of items that failed.")
+    timestamp: str

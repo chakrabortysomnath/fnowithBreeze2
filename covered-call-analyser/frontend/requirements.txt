@@ -4,3 +4,4 @@ streamlit>=1.35.0,<2.0.0
 requests>=2.31.0
 plotly>=5.22.0        # Phase 4 charts
 pandas>=2.2.0         # Phase 4 dataframes
+fpdf2>=2.7.0,<3.0.0   # Phase 6 PDF report generation

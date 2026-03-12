@@ -41,6 +41,7 @@ from .models import (
     AnalyseRequest, AnalyseResponse, PositionDetails, StrikeAnalysis,
     ChargesBreakdown, PayoffPoint,
     RefreshSessionRequest, RefreshSessionResponse,
+    WatchlistRequest, WatchlistResponse, WatchlistResultItem,
 )
 from .config import settings
 
@@ -297,6 +298,60 @@ def option_chain(
 
 
 # ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _build_analyse_response(result: dict, timestamp: str) -> AnalyseResponse:
+    """Convert a raw analyse_covered_call() dict into a typed AnalyseResponse.
+
+    Extracted so both /analyse and /analyse-watchlist share the same mapping
+    logic without duplication.
+    """
+    pos = result["position"]
+    position = PositionDetails(
+        lots=pos["lots"],
+        shares=pos["shares"],
+        cost_basis_per_share=pos["cost_basis_per_share"],
+        total_cost=pos["total_cost"],
+        already_holds=pos["already_holds"],
+    )
+
+    strikes = []
+    for s in result["strikes"]:
+        c = s["charges"]
+        strikes.append(StrikeAnalysis(
+            strike=s["strike"],
+            strike_type=s["strike_type"],
+            premium=s["premium"],
+            net_premium_per_share=s["net_premium_per_share"],
+            net_premium_total=s["net_premium_total"],
+            gross_premium_total=s["gross_premium_total"],
+            charges=ChargesBreakdown(**c),
+            breakeven=s["breakeven"],
+            breakeven_pct_below_cmp=s["breakeven_pct_below_cmp"],
+            max_profit_per_share=s["max_profit_per_share"],
+            max_profit_total=s["max_profit_total"],
+            premium_yield_pct=s["premium_yield_pct"],
+            annualised_yield_pct=s["annualised_yield_pct"],
+            downside_protection_pct=s["downside_protection_pct"],
+            iv=s.get("iv"),
+            open_interest=s.get("open_interest"),
+            payoff=[PayoffPoint(**p) for p in s["payoff"]],
+        ))
+
+    return AnalyseResponse(
+        symbol=result["symbol"],
+        cmp=result["cmp"],
+        expiry_date=result["expiry_date"],
+        days_to_expiry=result["days_to_expiry"],
+        lot_size=result["lot_size"],
+        position=position,
+        strikes=strikes,
+        timestamp=timestamp,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Phase 4 Config Endpoints — lot size management
 # ---------------------------------------------------------------------------
 
@@ -433,49 +488,84 @@ def analyse(req: AnalyseRequest) -> AnalyseResponse:
         logger.exception(f"Calculator error for {symbol}")
         raise HTTPException(status_code=500, detail=f"Calculation error: {exc}")
 
-    # --- Build typed response ---
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return _build_analyse_response(result, timestamp)
 
-    pos = result["position"]
-    position = PositionDetails(
-        lots=pos["lots"],
-        shares=pos["shares"],
-        cost_basis_per_share=pos["cost_basis_per_share"],
-        total_cost=pos["total_cost"],
-        already_holds=pos["already_holds"],
-    )
 
-    strikes = []
-    for s in result["strikes"]:
-        c = s["charges"]
-        strikes.append(StrikeAnalysis(
-            strike=s["strike"],
-            strike_type=s["strike_type"],
-            premium=s["premium"],
-            net_premium_per_share=s["net_premium_per_share"],
-            net_premium_total=s["net_premium_total"],
-            gross_premium_total=s["gross_premium_total"],
-            charges=ChargesBreakdown(**c),
-            breakeven=s["breakeven"],
-            breakeven_pct_below_cmp=s["breakeven_pct_below_cmp"],
-            max_profit_per_share=s["max_profit_per_share"],
-            max_profit_total=s["max_profit_total"],
-            premium_yield_pct=s["premium_yield_pct"],
-            annualised_yield_pct=s["annualised_yield_pct"],
-            downside_protection_pct=s["downside_protection_pct"],
-            iv=s.get("iv"),
-            open_interest=s.get("open_interest"),
-            payoff=[PayoffPoint(**p) for p in s["payoff"]],
-        ))
+# ---------------------------------------------------------------------------
+# Phase 6 Endpoints
+# ---------------------------------------------------------------------------
 
-    return AnalyseResponse(
-        symbol=result["symbol"],
-        cmp=result["cmp"],
-        expiry_date=result["expiry_date"],
-        days_to_expiry=result["days_to_expiry"],
-        lot_size=result["lot_size"],
-        position=position,
-        strikes=strikes,
+@app.post(
+    "/analyse-watchlist",
+    response_model=WatchlistResponse,
+    summary="Run covered call analysis for a list of symbols",
+    description=(
+        "Analyses up to 20 symbol+expiry combinations in a single request. "
+        "Symbols are processed sequentially (Breeze rate-limit friendly). "
+        "A per-item failure does **not** abort the batch — failed items are "
+        "returned with status='error' and the error message."
+    ),
+    tags=["Analysis"],
+)
+def analyse_watchlist(req: WatchlistRequest) -> WatchlistResponse:
+    """Run covered call analysis for each item in the watchlist.
+
+    Each item is analysed independently. Failures are collected rather than
+    raised, so a bad symbol or expired token for one item does not prevent
+    the remaining symbols from being analysed.
+
+    Raises:
+        422: Request body validation failure (e.g. empty list, >20 items).
+    """
+    from .calculator import _days_to_expiry as _dte
+
+    logger.info(f"POST /analyse-watchlist — {len(req.items)} items")
+    timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    results: list[WatchlistResultItem] = []
+
+    for item in req.items:
+        symbol = item.symbol.strip().upper()
+        try:
+            # Validate expiry format
+            datetime.strptime(item.expiry_date, "%Y-%m-%d")
+
+            cmp       = get_cmp(symbol)
+            lot_size  = get_lot_size(symbol)
+            chain     = get_option_chain(symbol, item.expiry_date)
+            dte       = _dte(item.expiry_date)
+
+            raw = analyse_covered_call(
+                symbol=symbol,
+                cmp=cmp,
+                lot_size=lot_size,
+                expiry_date=item.expiry_date,
+                days_to_expiry=dte,
+                option_chain=chain,
+                already_holds=item.already_holds,
+                quantity_held=item.quantity_held,
+                avg_purchase_price=item.avg_purchase_price,
+                brokerage=item.brokerage,
+                stt_rate=item.stt_rate,
+                gst_rate=item.gst_rate,
+            )
+            analyse_resp = _build_analyse_response(raw, timestamp)
+            results.append(WatchlistResultItem(
+                symbol=symbol, status="ok", result=analyse_resp,
+            ))
+
+        except Exception as exc:
+            logger.warning(f"Watchlist item {symbol} failed: {exc}")
+            results.append(WatchlistResultItem(
+                symbol=symbol, status="error", error=str(exc),
+            ))
+
+    succeeded = sum(1 for r in results if r.status == "ok")
+    return WatchlistResponse(
+        results=results,
+        total=len(results),
+        succeeded=succeeded,
+        failed=len(results) - succeeded,
         timestamp=timestamp,
     )
 
