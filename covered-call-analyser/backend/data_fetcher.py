@@ -53,6 +53,7 @@ _LOT_SIZES: dict[str, int] = {
     "ONGC":       3850,
     "NTPC":       3750,
     "ADANIENT":    625,
+    "ADANIPORTS":  475,
     "MARUTI":      100,
     "TATASTEEL":  5500,
     "TATAMOTORS": 1425,

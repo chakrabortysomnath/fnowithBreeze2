@@ -166,8 +166,6 @@ def _base_layout(height=280):
         font=dict(family="Inter, Segoe UI, sans-serif", size=12, color="#374151"),
         legend=dict(orientation="h", yanchor="bottom", y=1.05,
                     xanchor="left", x=0, font=dict(size=12)),
-        xaxis=dict(showgrid=False, zeroline=False),
-        yaxis=dict(showgrid=True, gridcolor=GRID_COLOR, zeroline=False),
         height=height,
     )
 
