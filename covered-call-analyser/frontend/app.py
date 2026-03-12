@@ -317,7 +317,7 @@ with left:
 
         # PDF download
         try:
-            pdf_bytes = generate_pdf([res], title=f"{res['symbol']} — Covered Call Report")
+            pdf_bytes = generate_pdf([res], title=f"{res['symbol']} - Covered Call Report")
             st.download_button(
                 label="Download PDF report",
                 data=pdf_bytes,
