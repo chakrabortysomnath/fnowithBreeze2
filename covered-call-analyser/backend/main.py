@@ -30,10 +30,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .breeze_client import get_session, is_connected
 from .calculator import analyse_covered_call
-from .data_fetcher import get_cmp, get_lot_size, get_available_expiries, get_option_chain
+from .data_fetcher import (
+    get_cmp, get_lot_size, get_available_expiries, get_option_chain,
+    get_all_lot_sizes, upsert_lot_size,
+)
 from .models import (
     HealthResponse, QuoteResponse,
-    LotSizeResponse, ExpiriesResponse, OptionChainResponse, OptionContract,
+    LotSizeResponse, LotSizeTableResponse, UpsertLotSizeRequest,
+    ExpiriesResponse, OptionChainResponse, OptionContract,
     AnalyseRequest, AnalyseResponse, PositionDetails, StrikeAnalysis,
     ChargesBreakdown, PayoffPoint,
 )
@@ -289,6 +293,60 @@ def option_chain(
 
     contracts = [OptionContract(**c) for c in contracts_raw]
     return OptionChainResponse(symbol=decoded, expiry_date=expiry, options=contracts)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 Config Endpoints — lot size management
+# ---------------------------------------------------------------------------
+
+@app.get(
+    "/lot-sizes",
+    response_model=LotSizeTableResponse,
+    summary="List all known F&O lot sizes",
+    description=(
+        "Returns the full in-memory lot size table (symbol → lot size). "
+        "Use POST /lot-sizes to add or update entries. "
+        "Note: changes made via POST are in-memory and reset on server restart."
+    ),
+    tags=["Configuration"],
+)
+def list_lot_sizes() -> LotSizeTableResponse:
+    """Return the complete lot size table."""
+    table = get_all_lot_sizes()
+    return LotSizeTableResponse(lot_sizes=table, count=len(table))
+
+
+@app.post(
+    "/lot-sizes",
+    response_model=LotSizeResponse,
+    summary="Add or update a symbol's lot size",
+    description=(
+        "Upserts a symbol into the in-memory lot size table. "
+        "If the symbol already exists its lot size is updated; otherwise it is added. "
+        "**Changes are in-memory only** and are lost on server restart. "
+        "For permanent changes, update the _LOT_SIZES dict in data_fetcher.py and redeploy."
+    ),
+    tags=["Configuration"],
+)
+def set_lot_size(req: UpsertLotSizeRequest) -> LotSizeResponse:
+    """Add or update a symbol's lot size.
+
+    Args:
+        req: UpsertLotSizeRequest with symbol and lot_size.
+
+    Returns:
+        LotSizeResponse confirming the stored symbol and lot_size.
+
+    Raises:
+        422: lot_size is not a positive integer (validated by Pydantic).
+    """
+    symbol = req.symbol.strip().upper()
+    try:
+        upsert_lot_size(symbol, req.lot_size)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    logger.info(f"POST /lot-sizes — upserted {symbol} = {req.lot_size}")
+    return LotSizeResponse(symbol=symbol, lot_size=req.lot_size)
 
 
 # ---------------------------------------------------------------------------

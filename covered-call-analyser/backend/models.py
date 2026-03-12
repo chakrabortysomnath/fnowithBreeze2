@@ -97,6 +97,22 @@ class OptionChainResponse(BaseModel):
 # Phase 3 — Covered call analysis
 # ---------------------------------------------------------------------------
 
+class LotSizeTableResponse(BaseModel):
+    """Response model for GET /lot-sizes — full table."""
+
+    lot_sizes: dict[str, int] = Field(
+        description="Mapping of NSE F&O symbol → lot size."
+    )
+    count: int = Field(description="Number of symbols in the table.")
+
+
+class UpsertLotSizeRequest(BaseModel):
+    """Request body for POST /lot-sizes — add or update one entry."""
+
+    symbol: str = Field(description="NSE F&O symbol, e.g. RELIANCE.")
+    lot_size: int = Field(gt=0, description="F&O lot size (must be positive).")
+
+
 class AnalyseRequest(BaseModel):
     """Request body for POST /analyse."""
 

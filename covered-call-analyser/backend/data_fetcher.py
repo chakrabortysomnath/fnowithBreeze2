@@ -53,7 +53,7 @@ _LOT_SIZES: dict[str, int] = {
     "ONGC":       3850,
     "NTPC":       3750,
     "ADANIENT":    625,
-    "ADANIPORTS":  475,
+    "ADAPOR":      475,
     "MARUTI":      100,
     "TATASTEEL":  5500,
     "TATAMOTORS": 1425,
@@ -79,6 +79,34 @@ _LOT_SIZES: dict[str, int] = {
     "BANKNIFTY":    15,
     "FINNIFTY":     40,
 }
+
+
+def get_all_lot_sizes() -> dict[str, int]:
+    """Return a snapshot of all known lot sizes (symbol → lot size).
+
+    Returns a copy so callers cannot mutate the internal table directly.
+    """
+    return dict(_LOT_SIZES)
+
+
+def upsert_lot_size(symbol: str, lot_size: int) -> None:
+    """Add or update a symbol's lot size in the in-memory table.
+
+    Changes are in-memory only and are lost when the server restarts.
+    For persistence, update _LOT_SIZES in this source file and redeploy.
+
+    Args:
+        symbol:   NSE F&O symbol (will be uppercased).
+        lot_size: Positive integer lot size.
+
+    Raises:
+        ValueError: If lot_size is not a positive integer.
+    """
+    symbol = symbol.strip().upper()
+    if lot_size <= 0:
+        raise ValueError(f"lot_size must be a positive integer, got {lot_size}.")
+    _LOT_SIZES[symbol] = lot_size
+    logger.info(f"Lot size upserted: {symbol} = {lot_size}")
 
 
 # ---------------------------------------------------------------------------
