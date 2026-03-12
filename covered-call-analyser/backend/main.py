@@ -29,8 +29,14 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from .breeze_client import get_session, is_connected
+from .calculator import analyse_covered_call
 from .data_fetcher import get_cmp, get_lot_size, get_available_expiries, get_option_chain
-from .models import HealthResponse, QuoteResponse, LotSizeResponse, ExpiriesResponse, OptionChainResponse, OptionContract
+from .models import (
+    HealthResponse, QuoteResponse,
+    LotSizeResponse, ExpiriesResponse, OptionChainResponse, OptionContract,
+    AnalyseRequest, AnalyseResponse, PositionDetails, StrikeAnalysis,
+    ChargesBreakdown, PayoffPoint,
+)
 from .config import settings
 
 # ---------------------------------------------------------------------------
@@ -283,6 +289,136 @@ def option_chain(
 
     contracts = [OptionContract(**c) for c in contracts_raw]
     return OptionChainResponse(symbol=decoded, expiry_date=expiry, options=contracts)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post(
+    "/analyse",
+    response_model=AnalyseResponse,
+    summary="Run covered call analysis for a symbol and expiry",
+    description=(
+        "Fetches live CMP, lot size, and the full call option chain for the "
+        "given symbol and expiry, then runs the covered call calculator across "
+        "ITM / ATM / OTM+1 / OTM+2 strikes. Returns per-strike metrics including "
+        "net premium, breakeven, max profit, yield, and a P&L payoff curve."
+    ),
+    tags=["Analysis"],
+)
+def analyse(req: AnalyseRequest) -> AnalyseResponse:
+    """Execute a covered call analysis.
+
+    Orchestrates: get_cmp → get_lot_size → get_option_chain → analyse_covered_call.
+
+    Raises:
+        404: Symbol not found or no option data for this expiry.
+        400: Invalid expiry date format.
+        503: Breeze session unavailable.
+    """
+    symbol = req.symbol.strip().upper()
+    logger.info(f"POST /analyse symbol={symbol} expiry={req.expiry_date}")
+
+    # Validate expiry format
+    try:
+        datetime.strptime(req.expiry_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid expiry_date '{req.expiry_date}'. Use YYYY-MM-DD.",
+        )
+
+    # --- Fetch market data ---
+    try:
+        cmp = get_cmp(symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    try:
+        lot_size = get_lot_size(symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    try:
+        chain = get_option_chain(symbol, req.expiry_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    # --- Run calculator ---
+    from .calculator import _days_to_expiry
+    dte = _days_to_expiry(req.expiry_date)
+
+    try:
+        result = analyse_covered_call(
+            symbol=symbol,
+            cmp=cmp,
+            lot_size=lot_size,
+            expiry_date=req.expiry_date,
+            days_to_expiry=dte,
+            option_chain=chain,
+            already_holds=req.already_holds,
+            quantity_held=req.quantity_held,
+            avg_purchase_price=req.avg_purchase_price,
+            brokerage=req.brokerage,
+            stt_rate=req.stt_rate,
+            gst_rate=req.gst_rate,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        logger.exception(f"Calculator error for {symbol}")
+        raise HTTPException(status_code=500, detail=f"Calculation error: {exc}")
+
+    # --- Build typed response ---
+    timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    pos = result["position"]
+    position = PositionDetails(
+        lots=pos["lots"],
+        shares=pos["shares"],
+        cost_basis_per_share=pos["cost_basis_per_share"],
+        total_cost=pos["total_cost"],
+        already_holds=pos["already_holds"],
+    )
+
+    strikes = []
+    for s in result["strikes"]:
+        c = s["charges"]
+        strikes.append(StrikeAnalysis(
+            strike=s["strike"],
+            strike_type=s["strike_type"],
+            premium=s["premium"],
+            net_premium_per_share=s["net_premium_per_share"],
+            net_premium_total=s["net_premium_total"],
+            gross_premium_total=s["gross_premium_total"],
+            charges=ChargesBreakdown(**c),
+            breakeven=s["breakeven"],
+            breakeven_pct_below_cmp=s["breakeven_pct_below_cmp"],
+            max_profit_per_share=s["max_profit_per_share"],
+            max_profit_total=s["max_profit_total"],
+            premium_yield_pct=s["premium_yield_pct"],
+            annualised_yield_pct=s["annualised_yield_pct"],
+            downside_protection_pct=s["downside_protection_pct"],
+            iv=s.get("iv"),
+            open_interest=s.get("open_interest"),
+            payoff=[PayoffPoint(**p) for p in s["payoff"]],
+        ))
+
+    return AnalyseResponse(
+        symbol=result["symbol"],
+        cmp=result["cmp"],
+        expiry_date=result["expiry_date"],
+        days_to_expiry=result["days_to_expiry"],
+        lot_size=result["lot_size"],
+        position=position,
+        strikes=strikes,
+        timestamp=timestamp,
+    )
 
 
 # ---------------------------------------------------------------------------

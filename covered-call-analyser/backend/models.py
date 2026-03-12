@@ -5,12 +5,16 @@ Phase 1 models:
     HealthResponse  — /health endpoint
     QuoteResponse   — /quote/{symbol} endpoint
 
-Phase 2+ models (stubs, expanded in later phases):
-    LotSizeResponse, OptionChainResponse, AnalyseRequest, AnalyseResponse
+Phase 2 models:
+    LotSizeResponse, ExpiriesResponse, OptionContract, OptionChainResponse
+
+Phase 3 models:
+    AnalyseRequest, ChargesBreakdown, PayoffPoint, StrikeAnalysis,
+    PositionDetails, AnalyseResponse
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional, Any
+from typing import Optional
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +55,7 @@ class QuoteResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 stubs — expanded in Phase 2
+# Phase 2 — Lot size, expiries, option chain
 # ---------------------------------------------------------------------------
 
 class LotSizeResponse(BaseModel):
@@ -90,26 +94,127 @@ class OptionChainResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Phase 3 stubs — expanded in Phase 3
+# Phase 3 — Covered call analysis
 # ---------------------------------------------------------------------------
 
 class AnalyseRequest(BaseModel):
     """Request body for POST /analyse."""
 
-    symbol: str
+    symbol: str = Field(description="NSE F&O symbol, e.g. RELIANCE.")
     expiry_date: str = Field(description="Option expiry in YYYY-MM-DD format.")
     already_holds: bool = Field(
-        description="True if the user already holds this stock."
+        description=(
+            "True if the user already holds this stock. "
+            "False for a buy-write (buy stock + write call simultaneously)."
+        )
     )
-    quantity_held: int = Field(default=0, ge=0)
-    avg_purchase_price: float = Field(default=0.0, ge=0.0)
-    brokerage: float = Field(default=40.0, gt=0)
-    stt_rate: float = Field(default=0.001, gt=0)
-    gst_rate: float = Field(default=0.18, gt=0)
+    quantity_held: int = Field(
+        default=0, ge=0,
+        description="Shares already held. Used only when already_holds=True.",
+    )
+    avg_purchase_price: float = Field(
+        default=0.0, ge=0.0,
+        description=(
+            "Average cost per share of existing holding (INR). "
+            "Used as cost basis when already_holds=True. "
+            "Defaults to live CMP when 0 or already_holds=False."
+        ),
+    )
+    brokerage: float = Field(
+        default=40.0, gt=0,
+        description="Fixed brokerage per option lot written (INR).",
+    )
+    stt_rate: float = Field(
+        default=0.001, gt=0,
+        description="STT rate on option premium as a decimal (0.001 = 0.1%).",
+    )
+    gst_rate: float = Field(
+        default=0.18, gt=0,
+        description="GST rate on brokerage as a decimal (0.18 = 18%).",
+    )
+
+
+class ChargesBreakdown(BaseModel):
+    """Breakdown of charges for one covered call leg."""
+
+    stt: float = Field(description="Securities Transaction Tax (INR).")
+    brokerage: float = Field(description="Brokerage (INR).")
+    gst: float = Field(description="GST on brokerage (INR).")
+    total: float = Field(description="Total charges (INR).")
+
+
+class PayoffPoint(BaseModel):
+    """One point on the P&L-at-expiry payoff curve."""
+
+    price: float = Field(description="Stock price at expiry (INR).")
+    pl: float = Field(description="P&L at that stock price (INR).")
+
+
+class StrikeAnalysis(BaseModel):
+    """Full covered call analysis for a single strike price."""
+
+    strike: float
+    strike_type: str = Field(
+        description="Strike classification: ITM, ATM, OTM+1, or OTM+2."
+    )
+    premium: float = Field(description="Option LTP (gross premium per share, INR).")
+    net_premium_per_share: float = Field(
+        description="Premium per share after charges (INR)."
+    )
+    net_premium_total: float = Field(
+        description="Total net premium for all shares written (INR)."
+    )
+    gross_premium_total: float = Field(
+        description="Gross premium before charges (INR)."
+    )
+    charges: ChargesBreakdown
+    breakeven: float = Field(
+        description="Stock price below which this position loses money (INR)."
+    )
+    breakeven_pct_below_cmp: float = Field(
+        description="Breakeven as % below CMP — represents downside protection."
+    )
+    max_profit_per_share: float = Field(
+        description="Maximum profit per share if stock is called away at strike (INR)."
+    )
+    max_profit_total: float = Field(
+        description="Maximum total profit if called away (INR)."
+    )
+    premium_yield_pct: float = Field(
+        description="Net premium as % of capital deployed."
+    )
+    annualised_yield_pct: Optional[float] = Field(
+        default=None,
+        description="Premium yield annualised to 365 days (%). None if DTE = 0.",
+    )
+    downside_protection_pct: float = Field(
+        description="Net premium as % of cost basis — how far stock can fall before a loss."
+    )
+    iv: Optional[float] = Field(default=None, description="Implied volatility (%).")
+    open_interest: Optional[int] = Field(default=None)
+    payoff: list[PayoffPoint] = Field(
+        description="P&L at expiry across a range of stock prices."
+    )
+
+
+class PositionDetails(BaseModel):
+    """Position sizing details."""
+
+    lots: int = Field(description="Number of option lots written.")
+    shares: int = Field(description="Total shares in position (lots × lot_size).")
+    cost_basis_per_share: float = Field(description="Cost basis per share (INR).")
+    total_cost: float = Field(description="Total capital deployed (INR).")
+    already_holds: bool
 
 
 class AnalyseResponse(BaseModel):
-    """Response model for POST /analyse (Phase 3)."""
+    """Response model for POST /analyse."""
 
-    # Full structure defined in Phase 3
-    data: Any = Field(description="Full analysis result dict.")
+    symbol: str
+    cmp: float
+    expiry_date: str
+    days_to_expiry: int
+    lot_size: int
+    position: PositionDetails
+    strikes: list[StrikeAnalysis]
+    timestamp: str
