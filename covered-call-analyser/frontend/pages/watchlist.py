@@ -3,7 +3,7 @@ frontend/pages/watchlist.py — Multi-stock watchlist Streamlit page (Phase 6).
 
 Layout:
   Left  — add-symbol form, watchlist table with remove buttons,
-           Run All button, summary table, Download PDF button
+           Run All button, summary table, Download JSX report button
   Right — symbol selector, strike comparison table, P&L payoff chart
 
 Session state:
@@ -17,7 +17,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from pdf_report import generate_pdf
+from jsx_report import generate_jsx
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -310,20 +310,20 @@ with left:
                 hide_index=True,
             )
 
-        # ── Download PDF ──────────────────────────────────────────────────────
+        # ── Download JSX report ───────────────────────────────────────────────
         try:
-            pdf_bytes = generate_pdf(
+            jsx_bytes = generate_jsx(
                 st.session_state.wl_results,
-                title="Breezy F&O — Watchlist Report",
+                title="Breezy F&O - Watchlist Report",
             )
             st.download_button(
-                label="Download PDF report",
-                data=pdf_bytes,
-                file_name="watchlist_report.pdf",
-                mime="application/pdf",
+                label="Download JSX report",
+                data=jsx_bytes,
+                file_name="watchlist_report.jsx",
+                mime="text/plain",
             )
         except Exception as exc:
-            st.warning(f"PDF generation failed: {exc}")
+            st.warning(f"JSX report generation failed: {exc}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
