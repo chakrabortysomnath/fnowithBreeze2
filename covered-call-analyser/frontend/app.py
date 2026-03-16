@@ -25,6 +25,13 @@ STRIKE_COLORS = {
 }
 GRID_COLOR = "#30363D"
 
+# yfinance ticker overrides for NSE indices
+_YFINANCE_OVERRIDE = {
+    "NIFTY":     "^NSEI",
+    "BANKNIFTY": "^NSEBANK",
+    "FINNIFTY":  "^NSEMDCP50",
+}
+
 # ── Page setup ────────────────────────────────────────────────────────────────
 
 st.set_page_config(
@@ -65,6 +72,7 @@ for key, default in [
     ("expiries",      []),
     ("symbol_loaded", ""),
     ("result",        None),
+    ("last_qty_held", 0),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -73,6 +81,10 @@ for key, default in [
 
 def _encode(sym: str) -> str:
     return sym.strip().upper().replace("&", "%26")
+
+
+def _yf_ticker(symbol: str) -> str:
+    return _YFINANCE_OVERRIDE.get(symbol.upper(), f"{symbol.upper()}.NS")
 
 
 @st.cache_data(ttl=300)
@@ -97,6 +109,22 @@ def _fetch_analyse(payload: dict) -> dict:
     return r.json()
 
 
+@st.cache_data(ttl=600)
+def _fetch_ohlc(symbol: str) -> pd.DataFrame | None:
+    import yfinance as yf
+    try:
+        df = yf.download(
+            _yf_ticker(symbol), period="1mo", interval="1d",
+            progress=False, auto_adjust=True,
+        )
+        if df.empty:
+            return None
+        df.index = pd.to_datetime(df.index)
+        return df
+    except Exception:
+        return None
+
+
 def _fmt_inr(v) -> str:
     if v is None:
         return "-"
@@ -117,10 +145,10 @@ def _base_layout(height=260):
 
 # ── Input form ────────────────────────────────────────────────────────────────
 
-st.divider()
+# Section 1: Select Symbol
+st.subheader("Select Symbol")
 
-# 1. Symbol — type-in dropdown from lot-size list
-symbols = _fetch_symbols()
+symbols     = _fetch_symbols()
 prev_symbol = st.session_state.symbol_loaded
 default_idx = symbols.index(prev_symbol) if prev_symbol in symbols else 0
 
@@ -132,7 +160,6 @@ symbol = st.selectbox(
     placeholder="Search NSE F&O symbol…",
 )
 
-# Auto-load expiries whenever the selected symbol changes
 if symbol and symbol != st.session_state.symbol_loaded:
     try:
         st.session_state.expiries      = _fetch_expiries(symbol)
@@ -144,7 +171,9 @@ if symbol and symbol != st.session_state.symbol_loaded:
 if not symbols:
     st.caption("⚠ Could not load symbol list — backend may be unreachable.")
 
-# 2. Expiry — single-line radio buttons
+# Section 2: Select Strike Date
+st.subheader("Select Strike Date")
+
 expiry_date = None
 if st.session_state.expiries:
     expiry_date = st.radio(
@@ -156,7 +185,9 @@ if st.session_state.expiries:
 else:
     st.caption("Select a symbol above to load expiry dates.")
 
-# 3. Configure: Holdings (renamed from "I already hold this stock")
+# Section 3: Configuration
+st.subheader("Configuration")
+
 configure_holdings = st.checkbox("Configure: Holdings")
 
 qty_held  = 0
@@ -171,7 +202,6 @@ if configure_holdings:
             help="Leave 0 to use live CMP as cost basis.",
         )
 
-# 4. Configure: Charges (checkbox-gated, replaces Advanced expander)
 brokerage = 40.0
 stt_rate  = 0.001
 gst_rate  = 0.18
@@ -205,6 +235,7 @@ if analyse_clicked and expiry_date and symbol:
                 "stt_rate":           stt_rate,
                 "gst_rate":           gst_rate,
             })
+            st.session_state["last_qty_held"] = qty_held
         except requests.HTTPError as exc:
             detail = ""
             try:
@@ -221,9 +252,40 @@ res = st.session_state.result
 
 if res:
     pos = res["position"]
-    st.divider()
 
-    # 5. Position Setup card
+    st.subheader("Results")
+
+    # ── 30-Day Candlestick Chart ──────────────────────────────────────────────
+    st.markdown('<div class="section-hd">30-Day Price History</div>',
+                unsafe_allow_html=True)
+
+    ohlc = _fetch_ohlc(res["symbol"])
+    if ohlc is not None and not ohlc.empty:
+        candle = go.Figure(go.Candlestick(
+            x=ohlc.index,
+            open=ohlc["Open"].squeeze(),
+            high=ohlc["High"].squeeze(),
+            low=ohlc["Low"].squeeze(),
+            close=ohlc["Close"].squeeze(),
+            increasing_line_color="#3FB950",
+            increasing_fillcolor="#3FB950",
+            decreasing_line_color="#F85149",
+            decreasing_fillcolor="#F85149",
+            name=res["symbol"],
+        ))
+        candle.update_layout(
+            **_base_layout(height=280),
+            title=dict(text=f"{res['symbol']} — last 30 days", font=dict(size=14)),
+            xaxis=dict(showgrid=False, zeroline=False, rangeslider_visible=False),
+            yaxis=dict(title="Price (₹)", showgrid=True,
+                       gridcolor=GRID_COLOR, zeroline=False),
+            xaxis_rangebreaks=[dict(bounds=["sat", "mon"])],
+        )
+        st.plotly_chart(candle, width="stretch", config={"displayModeBar": False})
+    else:
+        st.caption(f"Price history unavailable for {res['symbol']}.")
+
+    # ── Position Setup ────────────────────────────────────────────────────────
     st.markdown('<div class="section-hd">Position Setup</div>', unsafe_allow_html=True)
 
     trade_type     = "Holdings" if pos["already_holds"] else "Buy-Write"
@@ -240,10 +302,28 @@ if res:
     ps6.metric("Days to Expiry",        str(res["days_to_expiry"]))
     ps7.metric("Approx. Futures Price", _fmt_inr(approx_futures))
 
+    # Net Capital Required
+    last_qty = st.session_state.get("last_qty_held", 0)
+    lot_size = res["lot_size"]
+
+    if pos["already_holds"] and last_qty > 0:
+        additional = max(0, lot_size - last_qty)
+        net_capital = additional * res["cmp"]
+    else:
+        net_capital = pos["total_cost"]
+
+    ps8, = st.columns(1)
+    ps8.metric("Net Capital Required", _fmt_inr(net_capital))
+
+    if pos["already_holds"] and last_qty > 0:
+        st.caption(
+            f"You hold {last_qty:,} of {lot_size:,} shares. "
+            f"Buy {max(0, lot_size - last_qty):,} more at CMP."
+        )
+
     st.caption("Futures approximation: CMP × (1 + 8% × DTE/365)")
 
-    # Strike analysis table
-    st.divider()
+    # ── Strike Analysis ───────────────────────────────────────────────────────
     st.markdown('<div class="section-hd">Strike Analysis</div>', unsafe_allow_html=True)
 
     rows = []
