@@ -82,6 +82,67 @@ _LOT_SIZES: dict[str, int] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# F&O shortcode → NSE equity ticker mapping (used for price-history lookups)
+# ---------------------------------------------------------------------------
+
+_NSE_SYMBOLS: dict[str, str] = {
+    "ADAENT":  "ADANIENT",
+    "ADAPOR":  "ADANIPORTS",
+    "APOHOS":  "APOLLOHOSP",
+    "ASIPAI":  "ASIANPAINT",
+    "AXIBAN":  "AXISBANK",
+    "BAJAUT":  "BAJAJ-AUTO",
+    "BAJFIN":  "BAJAJ-AUTO",
+    "BHAAIR":  "BHARTIARTL",
+    "BHAPET":  "BPCL",
+    "CIPLA":   "CIPLA",
+    "COALIN":  "COALINDIA",
+    "DIVLAB":  "DIVISLAB",
+    "DRREDD":  "DRREDDY",
+    "EICRMOT": "EICHERMOT",
+    "GRAIND":  "GRASIM",
+    "HCLTEC":  "HCLTECH",
+    "HDFBAN":  "HDFCBANK",
+    "HDFCLIF": "HDFCLIFE",
+    "HERMOT":  "HEROMOTOCO",
+    "HINDAL":  "HINDALCO",
+    "HINUNI":  "HINDUNILVR",
+    "ICICIB":  "ICICIBANK",
+    "INDBAN":  "INDUSINDBK",
+    "INFTEC":  "INFY",
+    "INTAVI":  "INDIGO",
+    "ITC":     "ITC",
+    "JSWSTE":  "JSWSTEEL",
+    "KOTBAN":  "KOTAKBANK",
+    "LT":      "LT",
+    "MAHM&M":  "M&M",
+    "MARSUZ":  "MARUTI",
+    "MAXH":    "MAXHEALTH",
+    "NESIND":  "NESTLEIND",
+    "NTPC":    "NTPC",
+    "ONGC":    "ONGC",
+    "POWGRID": "POWERGRID",
+    "RELIND":  "RELIANCE",
+    "SBILIF":  "SBILIFE",
+    "STABAN":  "SBIN",
+    "SUNPHA":  "SUNPHARMA",
+    "TATMOT":  "TMPV",
+    "TATSTE":  "TATASTEEL",
+    "TCS":     "TCS",
+    "TECMAH":  "LTIM",
+    "TITCO":   "TITAN",
+    "ULTCEM":  "ULTRACEMCO",
+    "VEDL":    "VEDL",
+    "WIPRO":   "WIPRO",
+}
+
+
+def get_all_nse_symbols() -> dict[str, str]:
+    """Return the F&O shortcode → NSE equity ticker mapping."""
+    return dict(_NSE_SYMBOLS)
+
+
 def get_all_lot_sizes() -> dict[str, int]:
     """Return a snapshot of all known lot sizes (symbol → lot size).
 

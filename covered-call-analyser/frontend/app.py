@@ -25,8 +25,8 @@ STRIKE_COLORS = {
 }
 GRID_COLOR = "#30363D"
 
-# yfinance ticker overrides for NSE indices
-_YFINANCE_OVERRIDE = {
+# yfinance tickers for index F&O codes (not in the NSE equity mapping)
+_INDEX_YF_TICKERS = {
     "NIFTY":     "^NSEI",
     "BANKNIFTY": "^NSEBANK",
     "FINNIFTY":  "^NSEMDCP50",
@@ -83,8 +83,24 @@ def _encode(sym: str) -> str:
     return sym.strip().upper().replace("&", "%26")
 
 
-def _yf_ticker(symbol: str) -> str:
-    return _YFINANCE_OVERRIDE.get(symbol.upper(), f"{symbol.upper()}.NS")
+@st.cache_data(ttl=300)
+def _fetch_nse_symbol_map() -> dict[str, str]:
+    """Return F&O shortcode → NSE equity ticker from the backend config."""
+    try:
+        r = requests.get(f"{BACKEND_URL}/lot-sizes", timeout=5)
+        r.raise_for_status()
+        return r.json().get("nse_symbols", {})
+    except Exception:
+        return {}
+
+
+def _yf_ticker(symbol: str, nse_map: dict[str, str]) -> str:
+    """Resolve an F&O shortcode to a yfinance-compatible ticker."""
+    sym = symbol.upper()
+    if sym in _INDEX_YF_TICKERS:
+        return _INDEX_YF_TICKERS[sym]
+    nse = nse_map.get(sym)
+    return f"{nse}.NS" if nse else f"{sym}.NS"
 
 
 @st.cache_data(ttl=300)
@@ -110,13 +126,12 @@ def _fetch_analyse(payload: dict) -> dict:
 
 
 @st.cache_data(ttl=600)
-def _fetch_ohlc(symbol: str) -> pd.DataFrame | None:
+def _fetch_ohlc(ticker: str) -> pd.DataFrame | None:
+    """Fetch 30-day daily OHLC from yfinance. ticker is a resolved yfinance symbol."""
     import yfinance as yf
     try:
-        df = yf.download(
-            _yf_ticker(symbol), period="1mo", interval="1d",
-            progress=False, auto_adjust=True,
-        )
+        df = yf.download(ticker, period="1mo", interval="1d",
+                         progress=False, auto_adjust=True)
         if df.empty:
             return None
         df.index = pd.to_datetime(df.index)
@@ -259,7 +274,9 @@ if res:
     st.markdown('<div class="section-hd">30-Day Price History</div>',
                 unsafe_allow_html=True)
 
-    ohlc = _fetch_ohlc(res["symbol"])
+    nse_map  = _fetch_nse_symbol_map()
+    ticker   = _yf_ticker(res["symbol"], nse_map)
+    ohlc     = _fetch_ohlc(ticker)
     if ohlc is not None and not ohlc.empty:
         candle = go.Figure(go.Candlestick(
             x=ohlc.index,
@@ -275,7 +292,7 @@ if res:
         ))
         candle.update_layout(
             **_base_layout(height=280),
-            title=dict(text=f"{res['symbol']} — last 30 days", font=dict(size=14)),
+            title=dict(text=f"{res['symbol']} ({ticker}) — last 30 days", font=dict(size=14)),
             xaxis=dict(showgrid=False, zeroline=False, rangeslider_visible=False),
             yaxis=dict(title="Price (₹)", showgrid=True,
                        gridcolor=GRID_COLOR, zeroline=False),

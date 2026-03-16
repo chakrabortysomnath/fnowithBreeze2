@@ -32,7 +32,7 @@ from .breeze_client import get_session, is_connected, refresh_session
 from .calculator import analyse_covered_call
 from .data_fetcher import (
     get_cmp, get_lot_size, get_available_expiries, get_option_chain,
-    get_all_lot_sizes, upsert_lot_size,
+    get_all_lot_sizes, get_all_nse_symbols, upsert_lot_size,
 )
 from .models import (
     HealthResponse, QuoteResponse,
@@ -369,7 +369,11 @@ def _build_analyse_response(result: dict, timestamp: str) -> AnalyseResponse:
 def list_lot_sizes() -> LotSizeTableResponse:
     """Return the complete lot size table."""
     table = get_all_lot_sizes()
-    return LotSizeTableResponse(lot_sizes=table, count=len(table))
+    return LotSizeTableResponse(
+        lot_sizes=table,
+        nse_symbols=get_all_nse_symbols(),
+        count=len(table),
+    )
 
 
 @app.post(

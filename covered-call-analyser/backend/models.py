@@ -103,6 +103,10 @@ class LotSizeTableResponse(BaseModel):
     lot_sizes: dict[str, int] = Field(
         description="Mapping of NSE F&O symbol → lot size."
     )
+    nse_symbols: dict[str, str] = Field(
+        default={},
+        description="Mapping of F&O shortcode → NSE equity ticker for price-history lookups.",
+    )
     count: int = Field(description="Number of symbols in the table.")
 
 
