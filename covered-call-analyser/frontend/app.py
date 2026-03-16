@@ -288,7 +288,7 @@ if res:
         title=dict(text="Yield comparison by strike", font=dict(size=14)),
         yaxis=dict(title="Yield (%)", showgrid=True, gridcolor=GRID_COLOR, zeroline=False),
     )
-    st.plotly_chart(bar_fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(bar_fig, width="stretch", config={"displayModeBar": False})
 
     # ── P&L payoff chart ──────────────────────────────────────────────────────
     show_all = st.checkbox("Show all strikes on payoff chart", value=True)
@@ -322,7 +322,7 @@ if res:
                    gridcolor=GRID_COLOR),
         yaxis=dict(title="P&L (₹)", showgrid=True, gridcolor=GRID_COLOR, zeroline=False),
     )
-    st.plotly_chart(line_fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(line_fig, width="stretch", config={"displayModeBar": False})
 
     # ── Download ──────────────────────────────────────────────────────────────
     try:

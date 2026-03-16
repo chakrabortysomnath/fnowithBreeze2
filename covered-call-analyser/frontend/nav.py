@@ -99,7 +99,7 @@ def nav_bar(active: str) -> None:
         ("⚙️ Config",    "/config",    "config"),
     ]
     links = "\n".join(
-        f'<a class="nav-item{" active" if key == active else ""}" href="{href}">{label}</a>'
+        f'<a class="nav-item{" active" if key == active else ""}" href="{href}" target="_self">{label}</a>'
         for label, href, key in pages
     )
     st.markdown(f'<nav class="topnav">{links}</nav>', unsafe_allow_html=True)

@@ -394,7 +394,7 @@ if st.session_state.wl_results:
             yaxis=dict(title="P&L (₹)", showgrid=True,
                        gridcolor=GRID_COLOR, zeroline=False),
         )
-        st.plotly_chart(line_fig, use_container_width=True,
+        st.plotly_chart(line_fig, width="stretch",
                         config={"displayModeBar": False})
 
 else:
