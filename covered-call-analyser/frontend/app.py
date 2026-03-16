@@ -15,7 +15,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from pdf_report import generate_pdf
+from jsx_report import generate_jsx
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -315,17 +315,17 @@ with left:
             height=185,
         )
 
-        # PDF download
+        # JSX summary report download
         try:
-            pdf_bytes = generate_pdf([res], title=f"{res['symbol']} - Covered Call Report")
+            jsx_bytes = generate_jsx([res], title=f"{res['symbol']} - Covered Call Report")
             st.download_button(
-                label="Download PDF report",
-                data=pdf_bytes,
-                file_name=f"{res['symbol']}_covered_call.pdf",
-                mime="application/pdf",
+                label="Download JSX report",
+                data=jsx_bytes,
+                file_name=f"{res['symbol']}_covered_call.jsx",
+                mime="text/plain",
             )
         except Exception as exc:
-            st.warning(f"PDF generation failed: {exc}")
+            st.warning(f"JSX report generation failed: {exc}")
 
     else:
         # Placeholder table while no result yet

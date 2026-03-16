@@ -1,5 +1,5 @@
 """
-test_phase6.py — Phase 6 tests: watchlist endpoint + PDF report helper.
+test_phase6.py — Phase 6 tests: watchlist endpoint + JSX report helper.
 
 Tests cover:
   POST /analyse-watchlist:
@@ -11,12 +11,13 @@ Tests cover:
     - too many items (>20) → 422
     - invalid expiry per item collected as error (not 400)
 
-  generate_pdf():
+  generate_jsx():
     - returns bytes
-    - starts with the PDF magic number (%PDF)
+    - output is valid UTF-8
+    - contains React component boilerplate
     - non-empty output for a single result
-    - multiple results produce a larger PDF than one
-    - symbol name is encoded somewhere in the PDF bytes
+    - multiple results produce a larger JSX than one
+    - symbol name appears in the output
     - empty list raises ValueError
 
 Run:
@@ -267,21 +268,21 @@ def test_watchlist_invalid_expiry_per_item_collected_as_error():
 
 
 # ---------------------------------------------------------------------------
-# generate_pdf() — pure unit tests, no HTTP
+# generate_jsx() — pure unit tests, no HTTP
 # ---------------------------------------------------------------------------
 
-# Ensure frontend/ is on sys.path so we can import pdf_report directly
+# Ensure frontend/ is on sys.path so we can import jsx_report directly
 _FRONTEND_DIR = os.path.join(
     os.path.dirname(__file__), "..", "..", "frontend"
 )
 if _FRONTEND_DIR not in sys.path:
     sys.path.insert(0, os.path.abspath(_FRONTEND_DIR))
 
-from pdf_report import generate_pdf  # noqa: E402
+from jsx_report import generate_jsx  # noqa: E402
 
 
 def _sample_result(symbol="RELIANCE"):
-    """Minimal AnalyseResponse-shaped dict for PDF generation tests."""
+    """Minimal AnalyseResponse-shaped dict for JSX generation tests."""
     return {
         "symbol":         symbol,
         "cmp":            2865.0,
@@ -327,44 +328,52 @@ def _sample_result(symbol="RELIANCE"):
     }
 
 
-def test_generate_pdf_returns_bytes():
-    """generate_pdf() must return a bytes object."""
-    output = generate_pdf([_sample_result()])
+def test_generate_jsx_returns_bytes():
+    """generate_jsx() must return a bytes object."""
+    output = generate_jsx([_sample_result()])
     assert isinstance(output, bytes)
 
 
-def test_generate_pdf_starts_with_pdf_magic():
-    """Output must start with the PDF magic number %PDF."""
-    output = generate_pdf([_sample_result()])
-    assert output[:4] == b"%PDF", f"Expected %PDF header, got {output[:8]!r}"
+def test_generate_jsx_valid_utf8():
+    """Output must be valid UTF-8."""
+    output = generate_jsx([_sample_result()])
+    decoded = output.decode("utf-8")
+    assert len(decoded) > 0
 
 
-def test_generate_pdf_single_result_non_empty():
-    """A single-result PDF must be non-trivially sized (>1 KB)."""
-    output = generate_pdf([_sample_result()])
-    assert len(output) > 1024, f"PDF too small: {len(output)} bytes"
+def test_generate_jsx_contains_react_boilerplate():
+    """Output must contain React import and export default function."""
+    output = generate_jsx([_sample_result()])
+    text = output.decode("utf-8")
+    assert 'import React from "react"' in text
+    assert "export default function" in text
 
 
-def test_generate_pdf_multiple_results_larger_than_one():
-    """Two results produce a larger PDF than one result."""
-    one   = generate_pdf([_sample_result("RELIANCE")])
-    two   = generate_pdf([_sample_result("RELIANCE"), _sample_result("INFY")])
+def test_generate_jsx_single_result_non_empty():
+    """A single-result JSX must be non-trivially sized (>500 bytes)."""
+    output = generate_jsx([_sample_result()])
+    assert len(output) > 500, f"JSX too small: {len(output)} bytes"
+
+
+def test_generate_jsx_multiple_results_larger_than_one():
+    """Two results produce a larger JSX than one result."""
+    one = generate_jsx([_sample_result("RELIANCE")])
+    two = generate_jsx([_sample_result("RELIANCE"), _sample_result("INFY")])
     assert len(two) > len(one), (
-        f"Expected two-symbol PDF ({len(two)} B) > one-symbol PDF ({len(one)} B)"
+        f"Expected two-symbol JSX ({len(two)} B) > one-symbol JSX ({len(one)} B)"
     )
 
 
-def test_generate_pdf_symbol_in_output():
-    """The symbol name must appear in the PDF metadata (title is stored uncompressed)."""
+def test_generate_jsx_symbol_in_output():
+    """The symbol name must appear in the JSX output."""
     symbol = "RELIANCE"
-    title = f"{symbol} Covered Call Report"
-    output = generate_pdf([_sample_result(symbol)], title=title)
-    assert symbol.encode("latin-1") in output, (
-        f"Symbol '{symbol}' not found in PDF metadata"
+    output = generate_jsx([_sample_result(symbol)])
+    assert symbol.encode("utf-8") in output, (
+        f"Symbol '{symbol}' not found in JSX output"
     )
 
 
-def test_generate_pdf_empty_list_raises():
+def test_generate_jsx_empty_list_raises():
     """Passing an empty results list must raise ValueError."""
     with pytest.raises(ValueError, match="at least one"):
-        generate_pdf([])
+        generate_jsx([])
