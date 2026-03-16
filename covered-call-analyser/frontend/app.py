@@ -17,7 +17,6 @@ from nav import NAV_CSS, nav_bar
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000").rstrip("/")
 
-# Dark-friendly chart colors
 STRIKE_COLORS = {
     "ITM":   "#6A8FBF",
     "ATM":   "#58A6FF",
@@ -63,9 +62,9 @@ except Exception:
 # ── Session state ─────────────────────────────────────────────────────────────
 
 for key, default in [
-    ("expiries", []),
+    ("expiries",      []),
     ("symbol_loaded", ""),
-    ("result", None),
+    ("result",        None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -74,6 +73,16 @@ for key, default in [
 
 def _encode(sym: str) -> str:
     return sym.strip().upper().replace("&", "%26")
+
+
+@st.cache_data(ttl=300)
+def _fetch_symbols() -> list[str]:
+    try:
+        r = requests.get(f"{BACKEND_URL}/lot-sizes", timeout=5)
+        r.raise_for_status()
+        return sorted(r.json()["lot_sizes"].keys())
+    except Exception:
+        return []
 
 
 def _fetch_expiries(symbol: str) -> list[str]:
@@ -110,35 +119,49 @@ def _base_layout(height=260):
 
 st.divider()
 
-sym_col, load_col = st.columns([4, 1])
-with sym_col:
-    symbol = st.text_input(
-        label="symbol", value="RELIANCE",
-        placeholder="NSE symbol — e.g. RELIANCE",
-        label_visibility="collapsed",
-    )
-with load_col:
-    load_clicked = st.button("Load ↓", use_container_width=True)
+# 1. Symbol — type-in dropdown from lot-size list
+symbols = _fetch_symbols()
+prev_symbol = st.session_state.symbol_loaded
+default_idx = symbols.index(prev_symbol) if prev_symbol in symbols else 0
 
-if load_clicked and symbol:
+symbol = st.selectbox(
+    "Symbol",
+    options=symbols if symbols else [""],
+    index=default_idx,
+    label_visibility="collapsed",
+    placeholder="Search NSE F&O symbol…",
+)
+
+# Auto-load expiries whenever the selected symbol changes
+if symbol and symbol != st.session_state.symbol_loaded:
     try:
-        st.session_state.expiries = _fetch_expiries(symbol)
-        st.session_state.symbol_loaded = symbol.strip().upper()
-        st.session_state.result = None
+        st.session_state.expiries      = _fetch_expiries(symbol)
+        st.session_state.symbol_loaded = symbol
+        st.session_state.result        = None
     except Exception as exc:
-        st.error(f"Could not load expiries: {exc}")
+        st.error(f"Could not load expiries for {symbol}: {exc}")
 
+if not symbols:
+    st.caption("⚠ Could not load symbol list — backend may be unreachable.")
+
+# 2. Expiry — single-line radio buttons
 expiry_date = None
 if st.session_state.expiries:
-    expiry_date = st.selectbox("Expiry date", options=st.session_state.expiries)
+    expiry_date = st.radio(
+        "Expiry",
+        options=st.session_state.expiries,
+        horizontal=True,
+        label_visibility="collapsed",
+    )
 else:
-    st.caption("Enter a symbol and press **Load ↓** to fetch expiry dates.")
+    st.caption("Select a symbol above to load expiry dates.")
 
-already_holds = st.checkbox("I already hold this stock")
+# 3. Configure: Holdings (renamed from "I already hold this stock")
+configure_holdings = st.checkbox("Configure: Holdings")
 
 qty_held  = 0
 avg_price = 0.0
-if already_holds:
+if configure_holdings:
     q_col, p_col = st.columns(2)
     with q_col:
         qty_held = st.number_input("Shares held", min_value=0, step=1, value=250)
@@ -148,22 +171,34 @@ if already_holds:
             help="Leave 0 to use live CMP as cost basis.",
         )
 
-with st.expander("Advanced: charges", expanded=False):
-    brokerage = st.number_input("Brokerage per lot (₹)", min_value=1.0, step=1.0, value=40.0)
-    stt_rate  = st.number_input("STT rate", min_value=0.0001, max_value=0.05,
-                                 step=0.0001, value=0.001, format="%.4f")
-    gst_rate  = st.number_input("GST rate", min_value=0.01, max_value=0.30,
-                                 step=0.01, value=0.18, format="%.2f")
+# 4. Configure: Charges (checkbox-gated, replaces Advanced expander)
+brokerage = 40.0
+stt_rate  = 0.001
+gst_rate  = 0.18
 
-analyse_clicked = st.button("Analyse", use_container_width=True, disabled=(expiry_date is None))
+configure_charges = st.checkbox("Configure: Charges")
+if configure_charges:
+    ch1, ch2, ch3 = st.columns(3)
+    with ch1:
+        brokerage = st.number_input("Brokerage / lot (₹)", min_value=1.0,
+                                     step=1.0, value=40.0)
+    with ch2:
+        stt_rate = st.number_input("STT rate", min_value=0.0001, max_value=0.05,
+                                    step=0.0001, value=0.001, format="%.4f")
+    with ch3:
+        gst_rate = st.number_input("GST rate", min_value=0.01, max_value=0.30,
+                                    step=0.01, value=0.18, format="%.2f")
 
-if analyse_clicked and expiry_date:
+analyse_clicked = st.button("Analyse", use_container_width=True,
+                            disabled=(expiry_date is None or not symbol))
+
+if analyse_clicked and expiry_date and symbol:
     with st.spinner("Fetching data and running analysis…"):
         try:
             st.session_state.result = _fetch_analyse({
-                "symbol":             st.session_state.symbol_loaded or symbol.strip().upper(),
+                "symbol":             symbol,
                 "expiry_date":        expiry_date,
-                "already_holds":      already_holds,
+                "already_holds":      configure_holdings,
                 "quantity_held":      qty_held,
                 "avg_purchase_price": avg_price,
                 "brokerage":          brokerage,
@@ -188,19 +223,29 @@ if res:
     pos = res["position"]
     st.divider()
 
-    mc1, mc2, mc3, mc4 = st.columns(4)
-    mc1.metric("CMP",     _fmt_inr(res["cmp"]))
-    mc2.metric("Lots",    pos["lots"])
-    mc3.metric("Shares",  pos["shares"])
-    mc4.metric("Capital", _fmt_inr(pos["total_cost"]))
+    # 5. Position Setup card
+    st.markdown('<div class="section-hd">Position Setup</div>', unsafe_allow_html=True)
 
-    st.caption(
-        f"Cost basis ₹{pos['cost_basis_per_share']:,.2f} · "
-        f"Expiry {res['expiry_date']} · {res['days_to_expiry']} days · "
-        f"Lot size {res['lot_size']}"
-    )
+    trade_type     = "Holdings" if pos["already_holds"] else "Buy-Write"
+    approx_futures = res["cmp"] * (1 + 0.08 * res["days_to_expiry"] / 365)
 
-    # Strike table
+    ps1, ps2, ps3, ps4 = st.columns(4)
+    ps1.metric("Stock",        res["symbol"])
+    ps2.metric("CMP",          _fmt_inr(res["cmp"]))
+    ps3.metric("F&O Lot Size", f"{res['lot_size']:,}")
+    ps4.metric("Trade Type",   trade_type)
+
+    ps5, ps6, ps7 = st.columns(3)
+    ps5.metric("Purchase Cost (1 lot)", _fmt_inr(pos["total_cost"]))
+    ps6.metric("Days to Expiry",        str(res["days_to_expiry"]))
+    ps7.metric("Approx. Futures Price", _fmt_inr(approx_futures))
+
+    st.caption("Futures approximation: CMP × (1 + 8% × DTE/365)")
+
+    # Strike analysis table
+    st.divider()
+    st.markdown('<div class="section-hd">Strike Analysis</div>', unsafe_allow_html=True)
+
     rows = []
     for s in res["strikes"]:
         rows.append({
