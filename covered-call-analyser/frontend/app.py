@@ -10,7 +10,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from jsx_report import generate_jsx
 from nav import NAV_CSS, nav_bar
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -307,38 +306,33 @@ if res:
 
     trade_type     = "Holdings" if pos["already_holds"] else "Buy-Write"
     approx_futures = res["cmp"] * (1 + 0.08 * res["days_to_expiry"] / 365)
-
-    ps1, ps2, ps3, ps4 = st.columns(4)
-    ps1.metric("Stock",        res["symbol"])
-    ps2.metric("CMP",          _fmt_inr(res["cmp"]))
-    ps3.metric("F&O Lot Size", f"{res['lot_size']:,}")
-    ps4.metric("Trade Type",   trade_type)
-
-    ps5, ps6, ps7 = st.columns(3)
-    ps5.metric("Purchase Cost (1 lot)", _fmt_inr(pos["total_cost"]))
-    ps6.metric("Days to Expiry",        str(res["days_to_expiry"]))
-    ps7.metric("Approx. Futures Price", _fmt_inr(approx_futures))
-
-    # Net Capital Required
-    last_qty = st.session_state.get("last_qty_held", 0)
-    lot_size = res["lot_size"]
+    last_qty       = st.session_state.get("last_qty_held", 0)
+    lot_size       = res["lot_size"]
 
     if pos["already_holds"] and last_qty > 0:
-        additional = max(0, lot_size - last_qty)
-        net_capital = additional * res["cmp"]
+        net_capital = max(0, lot_size - last_qty) * res["cmp"]
     else:
         net_capital = pos["total_cost"]
 
-    ps8, = st.columns(1)
-    ps8.metric("Net Capital Required", _fmt_inr(net_capital))
+    ps_rows = [
+        ("Stock",                 "NSE F&O symbol",                                res["symbol"]),
+        ("Current Market Price",  "Live last traded price",                        _fmt_inr(res["cmp"])),
+        ("F&O Lot Size",          "Shares per contract lot",                       f"{lot_size:,}"),
+        ("Trade Type",            "Buy-Write (new position) or Holdings (existing)", trade_type),
+        ("Cost Basis / Share",    "Purchase price per share used for analysis",    _fmt_inr(pos["cost_basis_per_share"])),
+        ("Purchase Cost (1 lot)", "Total capital at cost basis × lot size",        _fmt_inr(pos["total_cost"])),
+        ("Days to Expiry",        "Calendar days remaining to selected expiry",    str(res["days_to_expiry"])),
+        ("Approx. Futures Price", "CMP × (1 + 8% × DTE / 365) at 8% carry",       _fmt_inr(approx_futures)),
+        ("Net Capital Required",  "Additional cash needed to complete the lot",    _fmt_inr(net_capital)),
+    ]
+    ps_df = pd.DataFrame(ps_rows, columns=["Field", "Description", "Value"])
+    st.dataframe(ps_df, use_container_width=True, hide_index=True)
 
     if pos["already_holds"] and last_qty > 0:
         st.caption(
-            f"You hold {last_qty:,} of {lot_size:,} shares. "
-            f"Buy {max(0, lot_size - last_qty):,} more at CMP."
+            f"You hold {last_qty:,} of {lot_size:,} shares — "
+            f"need {max(0, lot_size - last_qty):,} more at CMP to complete the lot."
         )
-
-    st.caption("Futures approximation: CMP × (1 + 8% × DTE/365)")
 
     # ── Strike Analysis ───────────────────────────────────────────────────────
     st.markdown('<div class="section-hd">Strike Analysis</div>', unsafe_allow_html=True)
@@ -400,17 +394,6 @@ if res:
     )
     st.plotly_chart(line_fig, width="stretch", config={"displayModeBar": False})
 
-    # ── Download ──────────────────────────────────────────────────────────────
-    try:
-        jsx_bytes = generate_jsx([res], title=f"{res['symbol']} - Covered Call Report")
-        st.download_button(
-            label="Download JSX report",
-            data=jsx_bytes,
-            file_name=f"{res['symbol']}_covered_call.jsx",
-            mime="text/plain",
-        )
-    except Exception as exc:
-        st.warning(f"JSX report generation failed: {exc}")
 
 else:
     placeholder = pd.DataFrame([
