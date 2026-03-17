@@ -4,10 +4,13 @@ frontend/app.py — Breezy F&O covered call analyser UI.
 Single-column layout with dark theme and top navigation.
 """
 
+import datetime
 import os
-import requests
+
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import requests
 import streamlit as st
 
 from nav import NAV_CSS, nav_bar
@@ -157,6 +160,178 @@ def _base_layout(height=260):
     )
 
 
+# Nifty sector index yfinance tickers (keyed by yfinance .info "sector" string)
+_SECTOR_INDEX: dict[str, str] = {
+    "Energy":                    "^CNXENERGY",
+    "Technology":                "^CNXIT",
+    "Financial Services":        "^NSEBANK",
+    "Consumer Staples":          "^CNXFMCG",
+    "Consumer Discretionary":    "^CNXAUTO",
+    "Healthcare":                "^CNXPHARMA",
+    "Basic Materials":           "^CNXMETAL",
+    "Industrials":               "^CNXINFRA",
+    "Real Estate":               "^CNXREALTY",
+    "Communication Services":    "^CNXMEDIA",
+}
+
+
+@st.cache_data(ttl=1800)
+def _fetch_intel(ticker: str) -> dict:
+    """Fetch equity fundamentals, analyst targets and event dates via yfinance.
+
+    ticker: resolved yfinance ticker e.g. 'RELIANCE.NS' or '^NSEI'.
+    Returns an all-None dict on any failure so callers need no error handling.
+    """
+    import yfinance as yf
+    blank = dict(
+        fifty_two_week_high=None, fifty_two_week_low=None,
+        beta=None, sector=None, industry=None,
+        earnings_date=None, ex_dividend_date=None,
+        analyst_target_low=None, analyst_target_mean=None,
+        analyst_target_high=None,
+        analyst_recommendation=None, analyst_count=None,
+    )
+    try:
+        info = yf.Ticker(ticker).info
+        result = {
+            "fifty_two_week_high":   info.get("fiftyTwoWeekHigh"),
+            "fifty_two_week_low":    info.get("fiftyTwoWeekLow"),
+            "beta":                  info.get("beta"),
+            "sector":                info.get("sector"),
+            "industry":              info.get("industry"),
+            "analyst_target_low":    info.get("targetLowPrice"),
+            "analyst_target_mean":   info.get("targetMeanPrice"),
+            "analyst_target_high":   info.get("targetHighPrice"),
+            "analyst_recommendation":info.get("recommendationKey"),
+            "analyst_count":         info.get("numberOfAnalystOpinions"),
+            "earnings_date":         None,
+            "ex_dividend_date":      None,
+        }
+        ex_ts = info.get("exDividendDate")
+        if ex_ts:
+            result["ex_dividend_date"] = datetime.datetime.fromtimestamp(
+                int(ex_ts)).strftime("%d %b %Y")
+        try:
+            t   = yf.Ticker(ticker)
+            cal = t.calendar
+            if cal and "Earnings Date" in cal:
+                dates = cal["Earnings Date"]
+                d = dates[0] if isinstance(dates, list) else dates
+                result["earnings_date"] = pd.Timestamp(d).strftime("%d %b %Y")
+        except Exception:
+            pass
+        return result
+    except Exception:
+        return blank
+
+
+@st.cache_data(ttl=3600)
+def _fetch_nse_actions(nse_symbol: str) -> dict:
+    """Fetch upcoming corporate actions from NSE (board meetings, AGM, dividends).
+
+    Hits the NSE unofficial API with a cookie-warm-up session.
+    Returns all-None dict gracefully on failure.
+    """
+    blank = dict(earnings_date=None, ex_dividend_date=None,
+                 agm_date=None, board_meeting_date=None)
+    try:
+        s = requests.Session()
+        s.headers.update({
+            "User-Agent":      ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 Chrome/120.0.0 Safari/537.36"),
+            "Referer":         "https://www.nseindia.com",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
+        s.get("https://www.nseindia.com", timeout=8)   # warm-up for cookies
+
+        r = s.get(
+            "https://www.nseindia.com/api/corporates-corporateActions",
+            params={"index": "equities", "symbol": nse_symbol.upper()},
+            timeout=8,
+        )
+        r.raise_for_status()
+        actions = r.json()
+
+        today  = datetime.date.today()
+        result = dict(blank)
+
+        def _parse(raw: str) -> datetime.date | None:
+            if not raw or raw.strip() in ("-", ""):
+                return None
+            for fmt in ("%d-%b-%Y", "%Y-%m-%d", "%d-%B-%Y"):
+                try:
+                    return datetime.datetime.strptime(raw.strip(), fmt).date()
+                except ValueError:
+                    continue
+            return None
+
+        for action in sorted(actions, key=lambda a: a.get("exDate", "")):
+            subj    = action.get("subject", "").lower()
+            ex_raw  = action.get("exDate", "") or action.get("exdividendDate", "")
+            rec_raw = action.get("recDate", "")
+            d = _parse(ex_raw) or _parse(rec_raw)
+            if not d or d < today:
+                continue
+            ds = d.strftime("%d %b %Y")
+            if "dividend" in subj and not result["ex_dividend_date"]:
+                result["ex_dividend_date"] = ds
+            elif ("agm" in subj or "annual general" in subj) and not result["agm_date"]:
+                result["agm_date"] = ds
+            elif "board meeting" in subj and not result["board_meeting_date"]:
+                result["board_meeting_date"] = ds
+            elif any(k in subj for k in (
+                "quarterly results", "financial results", "half yearly results"
+            )) and not result["earnings_date"]:
+                result["earnings_date"] = ds
+        return result
+    except Exception:
+        return blank
+
+
+def _compute_technicals(ohlc: pd.DataFrame | None) -> dict:
+    """Compute ATR-14 and annualised HV-20 from a daily OHLC dataframe."""
+    blank = dict(atr_14=None, hv_20_pct=None)
+    if ohlc is None or ohlc.empty or len(ohlc) < 3:
+        return blank
+    try:
+        close = ohlc["Close"].squeeze().astype(float)
+        high  = ohlc["High"].squeeze().astype(float)
+        low   = ohlc["Low"].squeeze().astype(float)
+
+        # Annualised HV (20-day log-return std × √252)
+        log_ret = np.log(close / close.shift(1)).dropna()
+        window  = min(20, len(log_ret))
+        hv = float(log_ret.rolling(window).std().iloc[-1]) * (252 ** 0.5) * 100
+
+        # ATR-14
+        prev  = close.shift(1)
+        tr    = pd.concat([high - low,
+                           (high - prev).abs(),
+                           (low  - prev).abs()], axis=1).max(axis=1).dropna()
+        atr   = float(tr.rolling(min(14, len(tr))).mean().iloc[-1])
+
+        return dict(atr_14=round(atr, 2), hv_20_pct=round(hv, 1))
+    except Exception:
+        return blank
+
+
+@st.cache_data(ttl=600)
+def _fetch_sector_ohlc(sector: str | None) -> pd.DataFrame | None:
+    """Fetch 3-month OHLC for the matching Nifty sector index."""
+    if not sector:
+        return None
+    idx = _SECTOR_INDEX.get(sector)
+    if not idx:
+        return None
+    import yfinance as yf
+    try:
+        df = yf.download(idx, period="3mo", interval="1d",
+                         progress=False, auto_adjust=True)
+        return df if not df.empty else None
+    except Exception:
+        return None
+
+
 # ── Input form ────────────────────────────────────────────────────────────────
 
 # Section 1: Select Symbol
@@ -273,9 +448,23 @@ if res:
     st.markdown('<div class="section-hd">30-Day Price History</div>',
                 unsafe_allow_html=True)
 
-    nse_map  = _fetch_nse_symbol_map()
-    ticker   = _yf_ticker(res["symbol"], nse_map)
-    ohlc     = _fetch_ohlc(ticker)
+    nse_map    = _fetch_nse_symbol_map()
+    ticker     = _yf_ticker(res["symbol"], nse_map)
+    ohlc       = _fetch_ohlc(ticker)
+    tech       = _compute_technicals(ohlc)
+    intel      = _fetch_intel(ticker)
+    nse_sym    = nse_map.get(res["symbol"].upper(), res["symbol"])
+    nse_acts   = _fetch_nse_actions(nse_sym)
+    sector_hv  = _compute_technicals(
+        _fetch_sector_ohlc(intel.get("sector"))
+    ).get("hv_20_pct")
+
+    # Prefer NSE corporate actions (more reliable for India); fall back to yfinance
+    earn_date  = nse_acts.get("earnings_date")  or intel.get("earnings_date")
+    ex_div     = nse_acts.get("ex_dividend_date") or intel.get("ex_dividend_date")
+    agm_date   = nse_acts.get("agm_date")
+    board_dt   = nse_acts.get("board_meeting_date")
+
     if ohlc is not None and not ohlc.empty:
         candle = go.Figure(go.Candlestick(
             x=ohlc.index,
@@ -314,16 +503,38 @@ if res:
     else:
         net_capital = pos["total_cost"]
 
+    # 52-week position indicator  e.g. "▓▓▓▓▓░░░░░  62%"
+    wk52_h = intel.get("fifty_two_week_high")
+    wk52_l = intel.get("fifty_two_week_low")
+    if wk52_h and wk52_l and wk52_h > wk52_l:
+        pct_range = (res["cmp"] - wk52_l) / (wk52_h - wk52_l) * 100
+        filled    = round(pct_range / 10)
+        bar       = "█" * filled + "░" * (10 - filled)
+        wk52_pos  = f"{bar}  {pct_range:.0f}% of range"
+    else:
+        wk52_pos  = "—"
+
     ps_rows = [
-        ("Stock",                 "NSE F&O symbol",                                res["symbol"]),
-        ("Current Market Price",  "Live last traded price",                        _fmt_inr(res["cmp"])),
-        ("F&O Lot Size",          "Shares per contract lot",                       f"{lot_size:,}"),
+        # ── Trade setup ──
+        ("Stock",                 "NSE F&O symbol",                                  res["symbol"]),
+        ("Current Market Price",  "Live last traded price",                          _fmt_inr(res["cmp"])),
+        ("F&O Lot Size",          "Shares per contract lot",                         f"{lot_size:,}"),
         ("Trade Type",            "Buy-Write (new position) or Holdings (existing)", trade_type),
-        ("Cost Basis / Share",    "Purchase price per share used for analysis",    _fmt_inr(pos["cost_basis_per_share"])),
-        ("Purchase Cost (1 lot)", "Total capital at cost basis × lot size",        _fmt_inr(pos["total_cost"])),
-        ("Days to Expiry",        "Calendar days remaining to selected expiry",    str(res["days_to_expiry"])),
-        ("Approx. Futures Price", "CMP × (1 + 8% × DTE / 365) at 8% carry",       _fmt_inr(approx_futures)),
-        ("Net Capital Required",  "Additional cash needed to complete the lot",    _fmt_inr(net_capital)),
+        ("Cost Basis / Share",    "Purchase price per share used for analysis",      _fmt_inr(pos["cost_basis_per_share"])),
+        ("Purchase Cost (1 lot)", "Total capital at cost basis × lot size",          _fmt_inr(pos["total_cost"])),
+        ("Days to Expiry",        "Calendar days remaining to selected expiry",      str(res["days_to_expiry"])),
+        ("Approx. Futures Price", "CMP × (1 + 8% × DTE / 365) at 8% carry",         _fmt_inr(approx_futures)),
+        ("Net Capital Required",  "Additional cash needed to complete the lot",      _fmt_inr(net_capital)),
+        # ── Equity context ──
+        ("52-Week High",          "Highest closing price in the last 52 weeks",      _fmt_inr(wk52_h)),
+        ("52-Week Low",           "Lowest closing price in the last 52 weeks",       _fmt_inr(wk52_l)),
+        ("52-Week Position",      "Where CMP sits within the annual high-low range", wk52_pos),
+        ("HV 20-Day",             "Annualised 20-day historical volatility (equity)", f"{tech['hv_20_pct']:.1f}%" if tech.get("hv_20_pct") else "—"),
+        ("Sector HV 20-Day",      "Annualised 20-day HV for the Nifty sector index", f"{sector_hv:.1f}%" if sector_hv else "—"),
+        ("ATR 14-Day",            "Average True Range over 14 sessions (₹)",         _fmt_inr(tech.get("atr_14"))),
+        ("Beta",                  "Price sensitivity relative to Nifty 50",          f"{intel['beta']:.2f}" if intel.get("beta") else "—"),
+        ("Sector / Industry",     "Equity classification from exchange data",
+         f"{intel.get('sector') or '—'} / {intel.get('industry') or '—'}"),
     ]
     ps_df = pd.DataFrame(ps_rows, columns=["Field", "Description", "Value"])
     st.dataframe(ps_df, use_container_width=True, hide_index=True)
@@ -334,24 +545,86 @@ if res:
             f"need {max(0, lot_size - last_qty):,} more at CMP to complete the lot."
         )
 
+    # ── Market Intelligence ───────────────────────────────────────────────────
+    st.markdown('<div class="section-hd">Market Intelligence</div>', unsafe_allow_html=True)
+
+    # Earnings warning banner
+    if earn_date:
+        try:
+            earn_dt = datetime.datetime.strptime(earn_date, "%d %b %Y").date()
+            exp_dt  = datetime.datetime.strptime(res["expiry_date"], "%Y-%m-%d").date()
+            if earn_dt <= exp_dt:
+                st.warning(
+                    f"⚠ Earnings on **{earn_date}** falls within this expiry. "
+                    "IV typically spikes into results — assignment and gap-down risk elevated."
+                )
+        except Exception:
+            pass
+
+    # Ex-dividend warning
+    if ex_div:
+        try:
+            exd_dt = datetime.datetime.strptime(ex_div, "%d %b %Y").date()
+            exp_dt = datetime.datetime.strptime(res["expiry_date"], "%Y-%m-%d").date()
+            if exd_dt <= exp_dt:
+                st.info(
+                    f"ℹ Ex-dividend date **{ex_div}** is within this expiry. "
+                    "Deep ITM calls carry early-assignment risk before dividend capture."
+                )
+        except Exception:
+            pass
+
+    n_analysts = intel.get("analyst_count") or 0
+
+    def _fmt_targets() -> str:
+        lo = intel.get("analyst_target_low")
+        mn = intel.get("analyst_target_mean")
+        hi = intel.get("analyst_target_high")
+        if not any([lo, mn, hi]):
+            return "—"
+        return "  |  ".join(filter(None, [
+            f"Low {_fmt_inr(lo)}"  if lo else None,
+            f"Target {_fmt_inr(mn)}" if mn else None,
+            f"High {_fmt_inr(hi)}" if hi else None,
+        ]))
+
+    mi_rows = [
+        ("Earnings Date",    "Next quarterly / annual results announcement",          earn_date or "—"),
+        ("Ex-Dividend Date", "Shares go ex-div (early assignment risk for ITM calls)", ex_div   or "—"),
+        ("Board Meeting",    "Next board meeting date",                               board_dt  or "—"),
+        ("AGM",              "Annual General Meeting date",                           agm_date  or "—"),
+        ("Analyst Targets",  f"Consensus price targets from {n_analysts} analysts",  _fmt_targets()),
+        ("Recommendation",   "Analyst consensus rating",
+         (intel.get("analyst_recommendation") or "—").upper()),
+    ]
+    mi_df = pd.DataFrame(mi_rows, columns=["Field", "Description", "Value"])
+    st.dataframe(mi_df, use_container_width=True, hide_index=True, height=247)
+
     # ── Strike Analysis ───────────────────────────────────────────────────────
     st.markdown('<div class="section-hd">Strike Analysis</div>', unsafe_allow_html=True)
 
     rows = []
     for s in res["strikes"]:
+        cmp_val      = res["cmp"]
+        moneyness    = (s["strike"] - cmp_val) / cmp_val * 100
+        gross        = s.get("gross_premium_total") or 0
+        charges_pct  = (s["charges"]["total"] / gross * 100) if gross > 0 else 0
         rows.append({
-            "Strike type":       s["strike_type"],
-            "Strike (₹)":        f"₹{s['strike']:,.0f}",
-            "Premium (₹)":       f"₹{s['premium']:,.2f}",
-            "Net premium":       _fmt_inr(s["net_premium_total"]),
-            "Breakeven":         _fmt_inr(s["breakeven"]),
-            "Max profit":        _fmt_inr(s["max_profit_total"]),
-            "Yield %":           f"{s['premium_yield_pct']:.2f}%",
-            "Ann. yield %":      (
-                f"{s['annualised_yield_pct']:.1f}%"
-                if s["annualised_yield_pct"] is not None else "-"
-            ),
-            "Downside protect.": f"{s['downside_protection_pct']:.2f}%",
+            "Type":          s["strike_type"],
+            "Strike (₹)":    f"₹{s['strike']:,.0f}",
+            "Moneyness":     f"{moneyness:+.1f}%",
+            "Premium (₹)":   f"₹{s['premium']:,.2f}",
+            "IV %":          f"{s['iv']:.1f}%" if s.get("iv") is not None else "—",
+            "Net premium":   _fmt_inr(s["net_premium_total"]),
+            "Charges %":     f"{charges_pct:.1f}%",
+            "Breakeven":     _fmt_inr(s["breakeven"]),
+            "Max profit":    _fmt_inr(s["max_profit_total"]),
+            "Yield %":       f"{s['premium_yield_pct']:.2f}%",
+            "Ann. yield %":  (f"{s['annualised_yield_pct']:.1f}%"
+                              if s["annualised_yield_pct"] is not None else "—"),
+            "Downside prot.":f"{s['downside_protection_pct']:.2f}%",
+            "OI":            f"{s['open_interest']:,}" if s.get("open_interest") is not None else "—",
+            "Volume":        f"{s['volume']:,}"        if s.get("volume")        is not None else "—",
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, height=185)
 

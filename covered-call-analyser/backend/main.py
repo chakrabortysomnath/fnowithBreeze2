@@ -336,6 +336,7 @@ def _build_analyse_response(result: dict, timestamp: str) -> AnalyseResponse:
             downside_protection_pct=s["downside_protection_pct"],
             iv=s.get("iv"),
             open_interest=s.get("open_interest"),
+            volume=s.get("volume"),
             payoff=[PayoffPoint(**p) for p in s["payoff"]],
         ))
 

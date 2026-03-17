@@ -88,6 +88,7 @@ def _analyse_strike(
     ltp: float,
     iv: float | None,
     open_interest: int | None,
+    volume: int | None,
     cost_basis: float,
     shares: int,
     lots: int,
@@ -138,6 +139,7 @@ def _analyse_strike(
         "downside_protection_pct": downside_protection_pct,
         "iv": iv,
         "open_interest": open_interest,
+        "volume": volume,
         "payoff": payoff,
     }
 
@@ -233,6 +235,7 @@ def analyse_covered_call(
             ltp=contract["ltp"],
             iv=contract.get("iv"),
             open_interest=contract.get("open_interest"),
+            volume=contract.get("volume"),
             cost_basis=cost_basis,
             shares=shares,
             lots=lots,

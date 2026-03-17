@@ -211,7 +211,8 @@ class StrikeAnalysis(BaseModel):
         description="Net premium as % of cost basis — how far stock can fall before a loss."
     )
     iv: Optional[float] = Field(default=None, description="Implied volatility (%).")
-    open_interest: Optional[int] = Field(default=None)
+    open_interest: Optional[int] = Field(default=None, description="Open interest (contracts).")
+    volume: Optional[int] = Field(default=None, description="Volume traded today (contracts).")
     payoff: list[PayoffPoint] = Field(
         description="P&L at expiry across a range of stock prices."
     )
