@@ -361,38 +361,17 @@ if res:
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, height=185)
 
-    # ── Yield bar chart ───────────────────────────────────────────────────────
-    strikes    = res["strikes"]
-    bar_x      = [s["strike_type"] for s in strikes]
-    bar_y_ann  = [s["annualised_yield_pct"] or 0 for s in strikes]
-    bar_y_prem = [s["premium_yield_pct"] for s in strikes]
-    bar_colors = [STRIKE_COLORS.get(t, "#20A4A0") for t in bar_x]
-
-    bar_fig = go.Figure()
-    bar_fig.add_trace(go.Bar(
-        name="Ann. yield %", x=bar_x, y=bar_y_ann,
-        marker_color=bar_colors,
-        text=[f"{v:.1f}%" for v in bar_y_ann], textposition="outside",
-    ))
-    bar_fig.add_trace(go.Bar(
-        name="Period yield %", x=bar_x, y=bar_y_prem,
-        marker_color=["#39D0C8"] * len(bar_x),
-        text=[f"{v:.2f}%" for v in bar_y_prem], textposition="outside",
-    ))
-    bar_fig.update_layout(
-        **_base_layout(height=260),
-        barmode="group",
-        title=dict(text="Yield comparison by strike", font=dict(size=14)),
-        yaxis=dict(title="Yield (%)", showgrid=True, gridcolor=GRID_COLOR, zeroline=False),
-    )
-    st.plotly_chart(bar_fig, width="stretch", config={"displayModeBar": False})
-
     # ── P&L payoff chart ──────────────────────────────────────────────────────
-    show_all = st.checkbox("Show all strikes on payoff chart", value=True)
+    st.markdown('<div class="section-hd">P&L Payoff</div>', unsafe_allow_html=True)
+
+    strikes      = res["strikes"]
+    strike_types = [s["strike_type"] for s in strikes]
+    payoff_opts  = ["All strikes"] + strike_types
+    selected     = st.radio("View payoff for", payoff_opts, horizontal=True, key="payoff_strike_sel")
 
     line_fig = go.Figure()
-    for i, s in enumerate(strikes):
-        if not show_all and i > 0:
+    for s in strikes:
+        if selected != "All strikes" and s["strike_type"] != selected:
             continue
         payoff = s["payoff"]
         xs = [p["price"] for p in payoff]
