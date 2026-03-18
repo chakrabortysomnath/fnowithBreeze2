@@ -462,6 +462,40 @@ def _fmt_inr(v) -> str:
     return f"₹{v:,.2f}"
 
 
+import math as _math
+
+def _bs_call_price(S: float, K: float, T: float, r: float, sigma: float) -> float:
+    """Black-Scholes European call price."""
+    if sigma <= 0 or T <= 0:
+        return max(S - K * _math.exp(-r * T), 0.0)
+    d1 = (_math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * _math.sqrt(T))
+    d2 = d1 - sigma * _math.sqrt(T)
+    N  = lambda x: 0.5 * (1.0 + _math.erf(x / _math.sqrt(2.0)))
+    return S * N(d1) - K * _math.exp(-r * T) * N(d2)
+
+
+def _bs_iv(S: float, K: float, T_days: float, C: float, r: float = 0.065) -> float | None:
+    """Implied volatility (annualised %) via bisection. Returns None when unsolvable."""
+    if T_days <= 0 or C <= 0 or S <= 0 or K <= 0:
+        return None
+    T = T_days / 365.0
+    lo, hi = 0.001, 5.0          # 0.1% – 500%
+    intrinsic = max(S - K * _math.exp(-r * T), 0.0)
+    if C <= intrinsic:            # below intrinsic — no valid IV
+        return None
+    for _ in range(120):
+        mid   = (lo + hi) / 2.0
+        price = _bs_call_price(S, K, T, r, mid)
+        if abs(price - C) < 0.01:
+            return round(mid * 100, 1)
+        if price < C:
+            lo = mid
+        else:
+            hi = mid
+    return round(((lo + hi) / 2.0) * 100, 1)
+
+
+
 def _base_layout(height=260):
     return dict(
         plot_bgcolor="#161B22",
@@ -974,13 +1008,31 @@ if res:
     vol_val = opt_q.get("volume")        if opt_q.get("volume")        is not None else sel_s.get("volume")
     ltp_val = opt_q.get("ltp")           if opt_q.get("ltp")           else           sel_s.get("premium")
 
+    # If Breeze doesn't return IV, compute it from Black-Scholes using the LTP
+    _iv_computed = False
+    if iv_val is None and ltp_val and res.get("days_to_expiry"):
+        iv_val = _bs_iv(
+            S=res["cmp"],
+            K=sel_s["strike"],
+            T_days=res["days_to_expiry"],
+            C=ltp_val,
+        )
+        if iv_val is not None:
+            _iv_computed = True
+
     gross       = sel_s.get("gross_premium_total") or 0
     moneyness   = (sel_s["strike"] - res["cmp"]) / res["cmp"] * 100
     charges_pct = (sel_s["charges"]["total"] / gross * 100) if gross > 0 else 0
 
+    _iv_label = "IV % (calc)" if _iv_computed else "IV %"
+    _iv_desc  = (
+        "Implied Volatility derived from Black-Scholes (Breeze did not return live IV)"
+        if _iv_computed else
+        "Implied Volatility — the market's expectation of future price movement for this strike"
+    )
     opt_rows = [
-        ("IV %",
-         "Implied Volatility — the market's expectation of future price movement for this strike",
+        (_iv_label,
+         _iv_desc,
          f"{iv_val:.1f}%" if iv_val is not None else "—"),
         ("Open Interest",
          "Total outstanding contracts at this strike — proxy for liquidity",
@@ -1103,41 +1155,6 @@ if res:
         })
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, height=185)
 
-    # ── Risk / Reward Summary ─────────────────────────────────────────────────
-    _sup  = intel.get("key_support")
-    _res  = intel.get("key_resistance")
-    _mom  = intel.get("momentum_outlook")
-    _rr   = {
-        "ITM":   intel.get("rr_itm"),
-        "ATM":   intel.get("rr_atm"),
-        "OTM+1": intel.get("rr_otm1"),
-        "OTM+2": intel.get("rr_otm2"),
-    }
-    _rr_available = any(_rr.values()) or _sup or _res or _mom
-    if _rr_available:
-        rr_rows = []
-        if _sup or _res:
-            rr_rows.append((
-                "Support / Resistance",
-                "Nearest technical levels that define the price range for the trade",
-                f"{_fmt_inr(_sup)} / {_fmt_inr(_res)}",
-            ))
-        if _mom:
-            _mom_icon = {"bullish": "▲", "neutral": "▶", "bearish": "▼"}.get(_mom, "")
-            rr_rows.append((
-                "Momentum (1 month)",
-                "Short-term price momentum outlook",
-                f"{_mom_icon} {_mom.capitalize()}",
-            ))
-        for stype, note in _rr.items():
-            if note:
-                rr_rows.append((f"{stype} Call R/R", f"Risk/reward for {stype} covered call", note))
-        st.markdown(_kv_table_html(rr_rows), unsafe_allow_html=True)
-        if _intel_source == "claude_api":
-            st.caption("⚡ Risk/reward notes estimated by Claude AI — verify before trading.")
-        elif _intel_source == "mock":
-            st.caption("🔶 Mock R/R notes — not real analysis.")
-
     # ── P&L payoff chart ──────────────────────────────────────────────────────
     st.markdown('<div class="section-hd">P&L Payoff</div>', unsafe_allow_html=True)
 
@@ -1176,6 +1193,93 @@ if res:
         yaxis=dict(title="P&L (₹)", showgrid=True, gridcolor=GRID_COLOR, zeroline=False),
     )
     st.plotly_chart(line_fig, width="stretch", config={"displayModeBar": False})
+
+    # ── Risk / Reward Summary ─────────────────────────────────────────────────
+    st.markdown('<div class="section-hd">Risk / Reward Summary</div>', unsafe_allow_html=True)
+
+    _sup  = intel.get("key_support")
+    _res  = intel.get("key_resistance")
+    _mom  = intel.get("momentum_outlook")
+    _lot  = res["lot_size"]
+    _cmp  = res["cmp"]
+
+    # ── Position build-up / capital at risk ───────────────────────────────────
+    _trade_type   = "Holdings" if pos.get("already_holds") else "Buy-Write"
+    _gross_capital = _lot * _cmp
+    build_rows = [
+        ("Position type",
+         "Whether shares are already held (Holdings) or bought together with the call (Buy-Write)",
+         _trade_type),
+        ("Lot size",
+         "Number of shares per F&O contract",
+         f"{_lot:,} shares"),
+        ("Gross equity capital",
+         "Total cost to own one lot at CMP (lot size × CMP) — before premium income",
+         _fmt_inr(_gross_capital)),
+    ]
+    if _sup:
+        _downside_cap = (_cmp - _sup) * _lot
+        build_rows.append((
+            "Downside to support",
+            f"Unrealised equity loss if stock falls from CMP to key support ₹{_sup:,.0f}",
+            _fmt_inr(_downside_cap),
+        ))
+    st.markdown(_kv_table_html(build_rows), unsafe_allow_html=True)
+
+    # Per-strike capital-at-risk comparison table
+    cap_df_rows = []
+    for s in res["strikes"]:
+        _net_prem = s.get("net_premium_total") or 0
+        _net_cap  = _gross_capital - _net_prem
+        _loss_pct = (_net_cap / _gross_capital * 100) if _gross_capital else 0
+        _loss_sup = ((_cmp - _sup) * _lot - _net_prem) if _sup and _sup < _cmp else None
+        cap_df_rows.append({
+            "Strike type":       s["strike_type"],
+            "Net premium (₹)":   f"₹{_net_prem:,.0f}",
+            "Net capital at risk": f"₹{_net_cap:,.0f}  ({_loss_pct:.1f}% of gross)",
+            "Loss to support":   f"₹{_loss_sup:,.0f}" if _loss_sup is not None else "—",
+            "Max profit (₹)":    _fmt_inr(s.get("max_profit_total")),
+        })
+    st.dataframe(pd.DataFrame(cap_df_rows), width="stretch", hide_index=True, height=185)
+
+    # ── Technical context + per-strike R/R commentary ─────────────────────────
+    _rr = {
+        "ITM":   intel.get("rr_itm"),
+        "ATM":   intel.get("rr_atm"),
+        "OTM+1": intel.get("rr_otm1"),
+        "OTM+2": intel.get("rr_otm2"),
+    }
+    rr_rows = []
+    if _sup or _res:
+        rr_rows.append((
+            "Support / Resistance",
+            "Nearest technical levels that bound the expected price range for the trade",
+            f"{_fmt_inr(_sup)} / {_fmt_inr(_res)}",
+        ))
+    if _mom:
+        _mom_icon = {"bullish": "▲", "neutral": "▶", "bearish": "▼"}.get(_mom, "")
+        rr_rows.append((
+            "Momentum (1 month)",
+            "Short-term price momentum outlook from Claude AI",
+            f"{_mom_icon} {_mom.capitalize()}",
+        ))
+    for stype, note in _rr.items():
+        if note:
+            rr_rows.append((
+                f"{stype} — R/R commentary",
+                f"Risk/reward commentary for the {stype} covered call strike",
+                note,
+            ))
+    if rr_rows:
+        st.markdown(_kv_table_html(rr_rows), unsafe_allow_html=True)
+
+    if _intel_source == "claude_api":
+        st.caption(
+            "⚡ Technical levels and R/R commentary estimated by Claude AI — "
+            "verify before trading."
+        )
+    elif _intel_source == "mock":
+        st.caption("🔶 Mock R/R commentary — not real analysis.")
 
 
 else:
