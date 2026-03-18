@@ -279,6 +279,8 @@ def _fetch_intel_claude(symbol: str, nse_symbol: str, cmp: float, bypass_intel: 
         earnings_date=None, ex_dividend_date=None,
         agm_date=None, board_meeting_date=None,
         atr_14=None, hv_20_pct=None, sector_hv=None,
+        key_support=None, key_resistance=None, momentum_outlook=None,
+        rr_itm=None, rr_atm=None, rr_otm1=None, rr_otm2=None,
         _source="blank", _input_tokens=0, _output_tokens=0, _cost_usd=0.0,
     )
 
@@ -426,10 +428,7 @@ Rules:
                 raw = raw[4:]
         data = json.loads(raw.strip())
         result = dict(blank)
-        for key in blank:
-            if key.startswith("_"):
-                continue
-            val = data.get(key)
+        for key, val in data.items():
             if val is not None:
                 result[key] = val
 
