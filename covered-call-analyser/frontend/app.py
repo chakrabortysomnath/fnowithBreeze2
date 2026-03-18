@@ -624,20 +624,26 @@ def _fetch_sector_ohlc(sector: str | None) -> pd.DataFrame | None:
 def _kv_table_html(rows: list[tuple[str, str, str]]) -> str:
     """Return HTML for a 2-column KV table.
 
-    Column 1: field name (bold, light) with description below in small gray text.
+    Column 1: field name with a ⓘ tooltip icon (title=desc on hover).
     Column 2: value (monospace, right-aligned).
+    Descriptions are shown on hover only — matches the Bypass Claude AI ? tooltip pattern.
     """
-    cell = "padding:8px 12px;border-bottom:1px solid #30363D;vertical-align:top;"
+    cell = "padding:6px 12px;border-bottom:1px solid #30363D;vertical-align:middle;"
     out  = [
         '<table style="width:100%;border-collapse:collapse;'
         'font-family:Inter,\'Segoe UI\',sans-serif;margin-bottom:4px;">'
     ]
     for name, desc, value in rows:
+        _tip  = f' title="{desc}"' if desc else ""
+        _icon = (
+            ' <span style="color:#8B949E;font-size:11px;cursor:help;">ⓘ</span>'
+            if desc else ""
+        )
         out.append(
             f'<tr>'
-            f'<td style="{cell} width:62%;">'
-            f'<span style="color:#E6EDF3;font-size:13px;font-weight:500;">{name}</span>'
-            f'<br><span style="color:#8B949E;font-size:11px;">{desc}</span>'
+            f'<td style="{cell} width:62%;"{_tip}>'
+            f'<span style="color:#E6EDF3;font-size:13px;font-weight:500;">'
+            f'{name}{_icon}</span>'
             f'</td>'
             f'<td style="{cell} width:38%;text-align:right;'
             f'color:#C9D1D9;font-size:13px;'
@@ -1204,8 +1210,15 @@ if res:
     _cmp  = res["cmp"]
 
     # ── Position build-up / capital at risk ───────────────────────────────────
-    _trade_type   = "Holdings" if pos.get("already_holds") else "Buy-Write"
+    _trade_type    = "Holdings" if pos.get("already_holds") else "Buy-Write"
     _gross_capital = _lot * _cmp
+    _rr_intel = {
+        "ITM":   intel.get("rr_itm"),
+        "ATM":   intel.get("rr_atm"),
+        "OTM+1": intel.get("rr_otm1"),
+        "OTM+2": intel.get("rr_otm2"),
+    }
+
     build_rows = [
         ("Position type",
          "Whether shares are already held (Holdings) or bought together with the call (Buy-Write)",
@@ -1218,60 +1231,70 @@ if res:
          _fmt_inr(_gross_capital)),
     ]
     if _sup:
-        _downside_cap = (_cmp - _sup) * _lot
         build_rows.append((
             "Downside to support",
             f"Unrealised equity loss if stock falls from CMP to key support ₹{_sup:,.0f}",
-            _fmt_inr(_downside_cap),
+            _fmt_inr((_cmp - _sup) * _lot),
         ))
-    st.markdown(_kv_table_html(build_rows), unsafe_allow_html=True)
-
-    # Per-strike capital-at-risk comparison table
-    cap_df_rows = []
-    for s in res["strikes"]:
-        _net_prem = s.get("net_premium_total") or 0
-        _net_cap  = _gross_capital - _net_prem
-        _loss_pct = (_net_cap / _gross_capital * 100) if _gross_capital else 0
-        _loss_sup = ((_cmp - _sup) * _lot - _net_prem) if _sup and _sup < _cmp else None
-        cap_df_rows.append({
-            "Strike type":       s["strike_type"],
-            "Net premium (₹)":   f"₹{_net_prem:,.0f}",
-            "Net capital at risk": f"₹{_net_cap:,.0f}  ({_loss_pct:.1f}% of gross)",
-            "Loss to support":   f"₹{_loss_sup:,.0f}" if _loss_sup is not None else "—",
-            "Max profit (₹)":    _fmt_inr(s.get("max_profit_total")),
-        })
-    st.dataframe(pd.DataFrame(cap_df_rows), width="stretch", hide_index=True, height=185)
-
-    # ── Technical context + per-strike R/R commentary ─────────────────────────
-    _rr = {
-        "ITM":   intel.get("rr_itm"),
-        "ATM":   intel.get("rr_atm"),
-        "OTM+1": intel.get("rr_otm1"),
-        "OTM+2": intel.get("rr_otm2"),
-    }
-    rr_rows = []
     if _sup or _res:
-        rr_rows.append((
+        build_rows.append((
             "Support / Resistance",
             "Nearest technical levels that bound the expected price range for the trade",
             f"{_fmt_inr(_sup)} / {_fmt_inr(_res)}",
         ))
     if _mom:
         _mom_icon = {"bullish": "▲", "neutral": "▶", "bearish": "▼"}.get(_mom, "")
-        rr_rows.append((
+        build_rows.append((
             "Momentum (1 month)",
             "Short-term price momentum outlook from Claude AI",
             f"{_mom_icon} {_mom.capitalize()}",
         ))
-    for stype, note in _rr.items():
-        if note:
-            rr_rows.append((
+    st.markdown(_kv_table_html(build_rows), unsafe_allow_html=True)
+
+    # ── Per-strike: capital metrics + R/R commentary (one block per strike) ───
+    strike_rows: list[tuple[str, str, str]] = []
+    for s in res["strikes"]:
+        stype     = s["strike_type"]
+        _net_prem = s.get("net_premium_total") or 0
+        _net_cap  = _gross_capital - _net_prem
+        _loss_pct = (_net_cap / _gross_capital * 100) if _gross_capital else 0
+        _loss_sup = ((_cmp - _sup) * _lot - _net_prem) if _sup and _sup < _cmp else None
+        _note     = _rr_intel.get(stype)
+
+        strike_rows.append((
+            f"{stype} — Net premium",
+            "Net option premium received after all transaction charges",
+            _fmt_inr(_net_prem),
+        ))
+        strike_rows.append((
+            f"{stype} — Net capital at risk",
+            "Gross equity capital minus net premium; the effective amount at risk in the position",
+            f"₹{_net_cap:,.0f}  ({_loss_pct:.1f}% of gross)",
+        ))
+        strike_rows.append((
+            f"{stype} — Loss to support",
+            (
+                f"Estimated P&L loss if stock falls to key support ₹{_sup:,.0f} — "
+                "equity loss offset by premium collected"
+            ) if _sup else "Key support level not available",
+            _fmt_inr(_loss_sup) if _loss_sup is not None else "—",
+        ))
+        strike_rows.append((
+            f"{stype} — Max profit",
+            "Maximum achievable profit if stock closes at or above the strike price at expiry",
+            _fmt_inr(s.get("max_profit_total")),
+        ))
+        if _note:
+            strike_rows.append((
                 f"{stype} — R/R commentary",
-                f"Risk/reward commentary for the {stype} covered call strike",
-                note,
+                "Claude AI risk/reward note for this strike — verify before trading",
+                _note,
             ))
-    if rr_rows:
-        st.markdown(_kv_table_html(rr_rows), unsafe_allow_html=True)
+        # visual spacer between strike groups
+        strike_rows.append(("", "", ""))
+
+    if strike_rows:
+        st.markdown(_kv_table_html(strike_rows), unsafe_allow_html=True)
 
     if _intel_source == "claude_api":
         st.caption(
