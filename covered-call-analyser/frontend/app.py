@@ -260,6 +260,10 @@ def _fetch_intel_claude(symbol: str, nse_symbol: str, cmp: float) -> dict:
     Replaces both _fetch_intel (yfinance Ticker.info) and _fetch_nse_actions (NSE API),
     both of which are rate-limited on Render.com shared IPs.
     Returns all-None dict on failure so callers need no error handling.
+
+    Bypass: set CLAUDE_INTEL_BYPASS=true to skip the API call and return mock data.
+    All returned dicts include _source ("claude_api" | "mock" | "blank"),
+    _input_tokens, _output_tokens, _cost_usd for UI cost display.
     """
     import json
     import anthropic
@@ -273,7 +277,36 @@ def _fetch_intel_claude(symbol: str, nse_symbol: str, cmp: float) -> dict:
         earnings_date=None, ex_dividend_date=None,
         agm_date=None, board_meeting_date=None,
         atr_14=None, hv_20_pct=None, sector_hv=None,
+        _source="blank", _input_tokens=0, _output_tokens=0, _cost_usd=0.0,
     )
+
+    # ── Bypass mode ───────────────────────────────────────────────────────────
+    if os.environ.get("CLAUDE_INTEL_BYPASS", "").lower() == "true":
+        today_dt = datetime.date.today()
+        logger.warning(
+            f"Data Collect for {nse_symbol} - CLAUDE_INTEL_BYPASS=true, returning mock data"
+        )
+        return dict(
+            fifty_two_week_high=round(cmp * 1.22, 2),
+            fifty_two_week_low=round(cmp * 0.74, 2),
+            beta=0.85,
+            sector="Consumer Staples",
+            industry="Household Products",
+            analyst_target_low=round(cmp * 0.92, 2),
+            analyst_target_mean=round(cmp * 1.08, 2),
+            analyst_target_high=round(cmp * 1.25, 2),
+            analyst_recommendation="hold",
+            analyst_count=22,
+            earnings_date=(today_dt + datetime.timedelta(days=45)).strftime("%d %b %Y"),
+            ex_dividend_date=(today_dt + datetime.timedelta(days=90)).strftime("%d %b %Y"),
+            board_meeting_date=(today_dt + datetime.timedelta(days=42)).strftime("%d %b %Y"),
+            agm_date=(today_dt + datetime.timedelta(days=120)).strftime("%d %b %Y"),
+            atr_14=round(cmp * 0.018, 2),
+            hv_20_pct=22.0,
+            sector_hv=18.5,
+            _source="mock", _input_tokens=0, _output_tokens=0, _cost_usd=0.0,
+        )
+
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         logger.warning(
@@ -330,13 +363,26 @@ Rules:
         data = json.loads(raw.strip())
         result = dict(blank)
         for key in blank:
+            if key.startswith("_"):
+                continue
             val = data.get(key)
             if val is not None:
                 result[key] = val
-        populated = sum(1 for v in result.values() if v is not None)
+
+        # Compute actual cost from token usage reported by the API
+        in_tok  = msg.usage.input_tokens
+        out_tok = msg.usage.output_tokens
+        cost    = in_tok * 5 / 1_000_000 + out_tok * 25 / 1_000_000
+        result["_source"]        = "claude_api"
+        result["_input_tokens"]  = in_tok
+        result["_output_tokens"] = out_tok
+        result["_cost_usd"]      = cost
+
+        populated = sum(1 for k, v in result.items() if not k.startswith("_") and v is not None)
         logger.warning(
             f"Data Collect for {nse_symbol} - Claude API intel returned "
-            f"{populated} populated fields, SOURCE - Claude API / claude-opus-4-6"
+            f"{populated} populated fields | {in_tok} in + {out_tok} out tokens "
+            f"| cost ${cost:.4f} | SOURCE - Claude API / claude-opus-4-6"
         )
         return result
     except Exception as exc:
@@ -770,7 +816,21 @@ if res:
          f"{sector_hv:.1f}%" if sector_hv else "—"),
     ]
     st.markdown(_kv_table_html(ed_rows), unsafe_allow_html=True)
-    st.caption("⚡ Equity data estimated by Claude AI — verify before trading.")
+    _intel_source = intel.get("_source", "blank")
+    if _intel_source == "claude_api":
+        _in  = intel.get("_input_tokens", 0)
+        _out = intel.get("_output_tokens", 0)
+        _usd = intel.get("_cost_usd", 0.0)
+        st.caption(
+            f"⚡ Estimated by Claude AI (claude-opus-4-6) · "
+            f"{_in:,} in + {_out:,} out tokens · "
+            f"~${_usd:.4f} this call · cached 1 h · "
+            f"verify before trading."
+        )
+    elif _intel_source == "mock":
+        st.caption("🔶 Mock data — bypass mode active (CLAUDE_INTEL_BYPASS=true). Not real data.")
+    else:
+        st.caption("⚠ Equity data unavailable — ANTHROPIC_API_KEY not set or API error.")
 
     # ── Options API Data ──────────────────────────────────────────────────────
     st.markdown('<div class="section-hd">Options API Data</div>', unsafe_allow_html=True)
@@ -905,7 +965,15 @@ if res:
          (intel.get("analyst_recommendation") or "—").upper()),
     ]
     st.markdown(_kv_table_html(mi_rows), unsafe_allow_html=True)
-    st.caption("⚡ Market intelligence estimated by Claude AI — verify corporate events before trading.")
+    if _intel_source == "claude_api":
+        st.caption(
+            "⚡ Market intelligence estimated by Claude AI — "
+            "verify corporate events before trading."
+        )
+    elif _intel_source == "mock":
+        st.caption("🔶 Mock data — bypass mode active (CLAUDE_INTEL_BYPASS=true). Not real data.")
+    else:
+        st.caption("⚠ Market intelligence unavailable — ANTHROPIC_API_KEY not set or API error.")
 
     # ── Strike Analysis ───────────────────────────────────────────────────────
     st.markdown('<div class="section-hd">Strike Analysis</div>', unsafe_allow_html=True)

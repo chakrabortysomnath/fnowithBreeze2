@@ -95,3 +95,9 @@ services:
       # Set manually in the Render dashboard — never stored in git.
       - key: ANTHROPIC_API_KEY
         sync: false
+
+      # Set to "true" to skip the Claude API call entirely and return mock data.
+      # Useful for development, demos, or when ANTHROPIC_API_KEY is not yet set.
+      # Mock values are price-consistent (derived from CMP) but are NOT real data.
+      - key: CLAUDE_INTEL_BYPASS
+        value: "false"
