@@ -348,13 +348,47 @@ Rules:
 - Prices must be consistent with the given CMP of ₹{cmp:.2f}.
 - Return ONLY the JSON object, no explanation or markdown."""
 
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        msg = client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
+    import time
+    client = anthropic.Anthropic(api_key=api_key)
+    msg = None
+    last_exc = None
+    for attempt in range(4):          # up to 4 attempts: 0 s, 2 s, 4 s, 8 s
+        if attempt:
+            time.sleep(2 ** attempt)
+        try:
+            msg = client.messages.create(
+                model="claude-opus-4-6",
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            break                     # success — exit retry loop
+        except anthropic.APIStatusError as exc:
+            last_exc = exc
+            if exc.status_code in (429, 529):
+                logger.warning(
+                    f"Data Collect for {nse_symbol} Claude API attempt {attempt + 1} "
+                    f"hit {exc.status_code}, retrying…"
+                )
+                continue
+            # Non-retriable API error — log and return blank immediately
+            logger.warning(
+                f"Data Collect for {nse_symbol} Claude API intel failed | error: {exc}"
+            )
+            return blank
+        except Exception as exc:
+            logger.warning(
+                f"Data Collect for {nse_symbol} Claude API intel failed | error: {exc}"
+            )
+            return blank
+
+    if msg is None:
+        logger.warning(
+            f"Data Collect for {nse_symbol} Claude API intel failed after retries "
+            f"| last error: {last_exc}"
         )
+        return blank
+
+    try:
         raw = msg.content[0].text.strip()
         # Strip markdown code fences if present
         if raw.startswith("```"):
@@ -389,7 +423,7 @@ Rules:
         return result
     except Exception as exc:
         logger.warning(
-            f"Data Collect for {nse_symbol} Claude API intel failed | error: {exc}"
+            f"Data Collect for {nse_symbol} Claude API intel parse failed | error: {exc}"
         )
         return blank
 
