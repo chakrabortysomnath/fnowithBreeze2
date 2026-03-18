@@ -15,6 +15,11 @@ import streamlit as st
 
 from nav import NAV_CSS, nav_bar
 
+# ── Logging ───────────────────────────────────────────────────────────────────
+
+import logging
+logger = logging.getLogger(__name__)
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000").rstrip("/")
@@ -131,14 +136,24 @@ def _fetch_analyse(payload: dict) -> dict:
 def _fetch_ohlc(ticker: str) -> pd.DataFrame | None:
     """Fetch 30-day daily OHLC from yfinance. ticker is a resolved yfinance symbol."""
     import yfinance as yf
+    criteria = f"ticker={ticker} period=1mo interval=1d"
+    source   = "yfinance/download"
     try:
         df = yf.download(ticker, period="1mo", interval="1d",
                          progress=False, auto_adjust=True)
         if df.empty:
+            logger.warning(
+                f"Data Collect for {ticker} failed, "
+                f"SEARCHED WITH - {criteria}, SOURCE - {source}"
+            )
             return None
         df.index = pd.to_datetime(df.index)
         return df
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            f"Data Collect for {ticker} failed, "
+            f"SEARCHED WITH - {criteria}, SOURCE - {source} | error: {exc}"
+        )
         return None
 
 
@@ -183,6 +198,8 @@ def _fetch_intel(ticker: str) -> dict:
     Returns an all-None dict on any failure so callers need no error handling.
     """
     import yfinance as yf
+    criteria = f"ticker={ticker}"
+    source   = "yfinance/Ticker.info"
     blank = dict(
         fifty_two_week_high=None, fifty_two_week_low=None,
         beta=None, sector=None, industry=None,
@@ -220,8 +237,27 @@ def _fetch_intel(ticker: str) -> dict:
                 result["earnings_date"] = pd.Timestamp(d).strftime("%d %b %Y")
         except Exception:
             pass
+
+        # Warn for each blank critical field
+        for field, label in [
+            ("fifty_two_week_high", "52-week high"),
+            ("fifty_two_week_low",  "52-week low"),
+            ("beta",                "beta"),
+            ("earnings_date",       "earnings date"),
+            ("ex_dividend_date",    "ex-dividend date"),
+            ("analyst_target_mean", "analyst target mean"),
+        ]:
+            if result.get(field) is None:
+                logger.warning(
+                    f"Data Collect for {ticker} [{label}] blank, "
+                    f"SEARCHED WITH - {criteria}, SOURCE - {source}"
+                )
         return result
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            f"Data Collect for {ticker} failed, "
+            f"SEARCHED WITH - {criteria}, SOURCE - {source} | error: {exc}"
+        )
         return blank
 
 
@@ -232,6 +268,8 @@ def _fetch_nse_actions(nse_symbol: str) -> dict:
     Hits the NSE unofficial API with a cookie-warm-up session.
     Returns all-None dict gracefully on failure.
     """
+    criteria = f"index=equities symbol={nse_symbol.upper()}"
+    source   = "nseindia.com/api/corporates-corporateActions"
     blank = dict(earnings_date=None, ex_dividend_date=None,
                  agm_date=None, board_meeting_date=None)
     try:
@@ -283,15 +321,38 @@ def _fetch_nse_actions(nse_symbol: str) -> dict:
                 "quarterly results", "financial results", "half yearly results"
             )) and not result["earnings_date"]:
                 result["earnings_date"] = ds
+
+        # Warn for each blank corporate event
+        for field, label in [
+            ("earnings_date",      "earnings date"),
+            ("ex_dividend_date",   "ex-dividend date"),
+            ("board_meeting_date", "board meeting date"),
+            ("agm_date",           "AGM date"),
+        ]:
+            if not result.get(field):
+                logger.warning(
+                    f"Data Collect for {nse_symbol} [{label}] blank, "
+                    f"SEARCHED WITH - {criteria}, SOURCE - {source}"
+                )
         return result
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            f"Data Collect for {nse_symbol} failed, "
+            f"SEARCHED WITH - {criteria}, SOURCE - {source} | error: {exc}"
+        )
         return blank
 
 
-def _compute_technicals(ohlc: pd.DataFrame | None) -> dict:
+def _compute_technicals(ohlc: pd.DataFrame | None, symbol: str = "unknown") -> dict:
     """Compute ATR-14 and annualised HV-20 from a daily OHLC dataframe."""
     blank = dict(atr_14=None, hv_20_pct=None)
-    if ohlc is None or ohlc.empty or len(ohlc) < 3:
+    rows  = len(ohlc) if ohlc is not None else 0
+    if ohlc is None or ohlc.empty or rows < 3:
+        logger.warning(
+            f"Data Collect for {symbol} [ATR-14, HV-20] blank, "
+            f"SEARCHED WITH - ohlc rows={rows} (need ≥3), "
+            f"SOURCE - equity OHLC/yfinance"
+        )
         return blank
     try:
         close = ohlc["Close"].squeeze().astype(float)
@@ -310,8 +371,21 @@ def _compute_technicals(ohlc: pd.DataFrame | None) -> dict:
                            (low  - prev).abs()], axis=1).max(axis=1).dropna()
         atr   = float(tr.rolling(min(14, len(tr))).mean().iloc[-1])
 
-        return dict(atr_14=round(atr, 2), hv_20_pct=round(hv, 1))
-    except Exception:
+        result = dict(atr_14=round(atr, 2), hv_20_pct=round(hv, 1))
+        for field, label in [("atr_14", "ATR-14"), ("hv_20_pct", "HV-20")]:
+            if result.get(field) is None:
+                logger.warning(
+                    f"Data Collect for {symbol} [{label}] blank, "
+                    f"SEARCHED WITH - ohlc rows={rows}, "
+                    f"SOURCE - equity OHLC/yfinance"
+                )
+        return result
+    except Exception as exc:
+        logger.warning(
+            f"Data Collect for {symbol} [ATR-14, HV-20] failed, "
+            f"SEARCHED WITH - ohlc rows={rows}, "
+            f"SOURCE - equity OHLC/yfinance | error: {exc}"
+        )
         return blank
 
 
@@ -322,14 +396,118 @@ def _fetch_sector_ohlc(sector: str | None) -> pd.DataFrame | None:
         return None
     idx = _SECTOR_INDEX.get(sector)
     if not idx:
+        logger.warning(
+            f"Data Collect for {sector} [sector OHLC] blank, "
+            f"SEARCHED WITH - sector={sector}, "
+            f"SOURCE - _SECTOR_INDEX mapping (no matching Nifty index)"
+        )
         return None
     import yfinance as yf
+    criteria = f"ticker={idx} period=3mo interval=1d"
+    source   = "yfinance/download"
     try:
         df = yf.download(idx, period="3mo", interval="1d",
                          progress=False, auto_adjust=True)
-        return df if not df.empty else None
-    except Exception:
+        if df.empty:
+            logger.warning(
+                f"Data Collect for {idx} [sector OHLC] blank, "
+                f"SEARCHED WITH - {criteria}, SOURCE - {source}"
+            )
+            return None
+        return df
+    except Exception as exc:
+        logger.warning(
+            f"Data Collect for {idx} [sector OHLC] failed, "
+            f"SEARCHED WITH - {criteria}, SOURCE - {source} | error: {exc}"
+        )
         return None
+
+
+def _kv_table_html(rows: list[tuple[str, str, str]]) -> str:
+    """Return HTML for a 2-column KV table.
+
+    Column 1: field name (bold, light) with description below in small gray text.
+    Column 2: value (monospace, right-aligned).
+    """
+    cell = "padding:8px 12px;border-bottom:1px solid #30363D;vertical-align:top;"
+    out  = [
+        '<table style="width:100%;border-collapse:collapse;'
+        'font-family:Inter,\'Segoe UI\',sans-serif;margin-bottom:4px;">'
+    ]
+    for name, desc, value in rows:
+        out.append(
+            f'<tr>'
+            f'<td style="{cell} width:62%;">'
+            f'<span style="color:#E6EDF3;font-size:13px;font-weight:500;">{name}</span>'
+            f'<br><span style="color:#8B949E;font-size:11px;">{desc}</span>'
+            f'</td>'
+            f'<td style="{cell} width:38%;text-align:right;'
+            f'color:#C9D1D9;font-size:13px;'
+            f'font-family:\'Courier New\',monospace;">{value}</td>'
+            f'</tr>'
+        )
+    out.append('</table>')
+    return "".join(out)
+
+
+def _options_api_table_html(strikes: list[dict], cmp: float) -> str:
+    """Return HTML for the per-strike Options API data table."""
+    TYPE_CLR = {
+        "ITM":   "#6A8FBF",
+        "ATM":   "#58A6FF",
+        "OTM+1": "#20A4A0",
+        "OTM+2": "#39D0C8",
+    }
+    hd = (
+        "padding:7px 10px;border-bottom:2px solid #30363D;"
+        "color:#8B949E;font-size:11px;font-weight:600;white-space:nowrap;"
+    )
+    td = (
+        "padding:7px 10px;border-bottom:1px solid #21262D;"
+        "color:#C9D1D9;font-size:13px;text-align:right;"
+        "font-family:'Courier New',monospace;"
+    )
+    columns = [
+        ("Strike (₹)",  "left"),
+        ("Type",        "center"),
+        ("IV %",        "right"),
+        ("OI",          "right"),
+        ("Volume",      "right"),
+        ("Moneyness %", "right"),
+        ("Charges %",   "right"),
+    ]
+    out = [
+        '<table style="width:100%;border-collapse:collapse;'
+        'font-family:Inter,\'Segoe UI\',sans-serif;">'
+        '<thead><tr>'
+    ]
+    for label, align in columns:
+        out.append(f'<th style="{hd} text-align:{align};">{label}</th>')
+    out.append('</tr></thead><tbody>')
+
+    for s in strikes:
+        gross       = s.get("gross_premium_total") or 0
+        moneyness   = (s["strike"] - cmp) / cmp * 100
+        charges_pct = (s["charges"]["total"] / gross * 100) if gross > 0 else 0
+        iv_s  = f"{s['iv']:.1f}%"        if s.get("iv")           is not None else "—"
+        oi_s  = f"{s['open_interest']:,}" if s.get("open_interest") is not None else "—"
+        vol_s = f"{s['volume']:,}"        if s.get("volume")        is not None else "—"
+        clr   = TYPE_CLR.get(s["strike_type"], "#8B949E")
+        out.append(
+            f'<tr>'
+            f'<td style="{td} text-align:left;font-weight:600;color:#E6EDF3;">'
+            f'₹{s["strike"]:,.0f}</td>'
+            f'<td style="{td} text-align:center;">'
+            f'<span style="color:{clr};font-weight:700;">{s["strike_type"]}</span></td>'
+            f'<td style="{td}">{iv_s}</td>'
+            f'<td style="{td}">{oi_s}</td>'
+            f'<td style="{td}">{vol_s}</td>'
+            f'<td style="{td}">{moneyness:+.1f}%</td>'
+            f'<td style="{td}">{charges_pct:.1f}%</td>'
+            f'</tr>'
+        )
+    out.append('</tbody></table>')
+    return "".join(out)
 
 
 # ── Input form ────────────────────────────────────────────────────────────────
@@ -451,12 +629,13 @@ if res:
     nse_map    = _fetch_nse_symbol_map()
     ticker     = _yf_ticker(res["symbol"], nse_map)
     ohlc       = _fetch_ohlc(ticker)
-    tech       = _compute_technicals(ohlc)
+    tech       = _compute_technicals(ohlc, symbol=ticker)
     intel      = _fetch_intel(ticker)
     nse_sym    = nse_map.get(res["symbol"].upper(), res["symbol"])
     nse_acts   = _fetch_nse_actions(nse_sym)
     sector_hv  = _compute_technicals(
-        _fetch_sector_ohlc(intel.get("sector"))
+        _fetch_sector_ohlc(intel.get("sector")),
+        symbol=f"sector:{intel.get('sector') or 'unknown'}",
     ).get("hv_20_pct")
 
     # Prefer NSE corporate actions (more reliable for India); fall back to yfinance
@@ -503,19 +682,7 @@ if res:
     else:
         net_capital = pos["total_cost"]
 
-    # 52-week position indicator  e.g. "▓▓▓▓▓░░░░░  62%"
-    wk52_h = intel.get("fifty_two_week_high")
-    wk52_l = intel.get("fifty_two_week_low")
-    if wk52_h and wk52_l and wk52_h > wk52_l:
-        pct_range = (res["cmp"] - wk52_l) / (wk52_h - wk52_l) * 100
-        filled    = round(pct_range / 10)
-        bar       = "█" * filled + "░" * (10 - filled)
-        wk52_pos  = f"{bar}  {pct_range:.0f}% of range"
-    else:
-        wk52_pos  = "—"
-
     ps_rows = [
-        # ── Trade setup ──
         ("Stock",                 "NSE F&O symbol",                                  res["symbol"]),
         ("Current Market Price",  "Live last traded price",                          _fmt_inr(res["cmp"])),
         ("F&O Lot Size",          "Shares per contract lot",                         f"{lot_size:,}"),
@@ -525,25 +692,58 @@ if res:
         ("Days to Expiry",        "Calendar days remaining to selected expiry",      str(res["days_to_expiry"])),
         ("Approx. Futures Price", "CMP × (1 + 8% × DTE / 365) at 8% carry",         _fmt_inr(approx_futures)),
         ("Net Capital Required",  "Additional cash needed to complete the lot",      _fmt_inr(net_capital)),
-        # ── Equity context ──
-        ("52-Week High",          "Highest closing price in the last 52 weeks",      _fmt_inr(wk52_h)),
-        ("52-Week Low",           "Lowest closing price in the last 52 weeks",       _fmt_inr(wk52_l)),
-        ("52-Week Position",      "Where CMP sits within the annual high-low range", wk52_pos),
-        ("HV 20-Day",             "Annualised 20-day historical volatility (equity)", f"{tech['hv_20_pct']:.1f}%" if tech.get("hv_20_pct") else "—"),
-        ("Sector HV 20-Day",      "Annualised 20-day HV for the Nifty sector index", f"{sector_hv:.1f}%" if sector_hv else "—"),
-        ("ATR 14-Day",            "Average True Range over 14 sessions (₹)",         _fmt_inr(tech.get("atr_14"))),
-        ("Beta",                  "Price sensitivity relative to Nifty 50",          f"{intel['beta']:.2f}" if intel.get("beta") else "—"),
-        ("Sector / Industry",     "Equity classification from exchange data",
-         f"{intel.get('sector') or '—'} / {intel.get('industry') or '—'}"),
     ]
-    ps_df = pd.DataFrame(ps_rows, columns=["Field", "Description", "Value"])
-    st.dataframe(ps_df, use_container_width=True, hide_index=True)
+    st.markdown(_kv_table_html(ps_rows), unsafe_allow_html=True)
 
     if pos["already_holds"] and last_qty > 0:
         st.caption(
             f"You hold {last_qty:,} of {lot_size:,} shares — "
             f"need {max(0, lot_size - last_qty):,} more at CMP to complete the lot."
         )
+
+    # ── Equity Data ───────────────────────────────────────────────────────────
+    st.markdown('<div class="section-hd">Equity Data</div>', unsafe_allow_html=True)
+    st.caption(f"Fetched using yfinance ticker: `{ticker}`")
+
+    wk52_h = intel.get("fifty_two_week_high")
+    wk52_l = intel.get("fifty_two_week_low")
+
+    ed_rows = [
+        ("52-Week High",     "Highest closing price over the last 52 weeks",          _fmt_inr(wk52_h)),
+        ("52-Week Low",      "Lowest closing price over the last 52 weeks",           _fmt_inr(wk52_l)),
+        ("Beta",             "Price sensitivity relative to Nifty 50",               f"{intel['beta']:.2f}" if intel.get("beta") else "—"),
+        ("Sector",           "Equity sector classification (from exchange data)",     intel.get("sector")   or "—"),
+        ("Industry",         "Equity industry classification (from exchange data)",   intel.get("industry") or "—"),
+        ("Sector HV 20-Day", "Annualised 20-day HV of the matching Nifty sector index",
+         f"{sector_hv:.1f}%" if sector_hv else "—"),
+    ]
+    st.markdown(_kv_table_html(ed_rows), unsafe_allow_html=True)
+
+    # ── Options API Data ──────────────────────────────────────────────────────
+    st.markdown('<div class="section-hd">Options API Data</div>', unsafe_allow_html=True)
+
+    # Per-strike table: IV, OI, Volume, Moneyness, Charges
+    st.markdown(_options_api_table_html(res["strikes"], res["cmp"]), unsafe_allow_html=True)
+
+    # Equity-level reference metrics that contextualise the option data
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+
+    if wk52_h and wk52_l and wk52_h > wk52_l:
+        pct_range = (res["cmp"] - wk52_l) / (wk52_h - wk52_l) * 100
+        filled    = round(pct_range / 10)
+        wk52_pos  = f"{'█' * filled}{'░' * (10 - filled)}  {pct_range:.0f}% of 52w range"
+    else:
+        wk52_pos  = "—"
+
+    ref_rows = [
+        ("52-Week Position", "CMP within the 52-week high–low band (0% = 52w low, 100% = 52w high)",
+         wk52_pos),
+        ("HV 20-Day",        "Annualised 20-day historical volatility of the equity",
+         f"{tech['hv_20_pct']:.1f}%" if tech.get("hv_20_pct") else "—"),
+        ("ATR 14-Day",       "Average True Range over the last 14 sessions — daily price noise in ₹",
+         _fmt_inr(tech.get("atr_14"))),
+    ]
+    st.markdown(_kv_table_html(ref_rows), unsafe_allow_html=True)
 
     # ── Market Intelligence ───────────────────────────────────────────────────
     st.markdown('<div class="section-hd">Market Intelligence</div>', unsafe_allow_html=True)
@@ -583,48 +783,38 @@ if res:
         if not any([lo, mn, hi]):
             return "—"
         return "  |  ".join(filter(None, [
-            f"Low {_fmt_inr(lo)}"  if lo else None,
-            f"Target {_fmt_inr(mn)}" if mn else None,
-            f"High {_fmt_inr(hi)}" if hi else None,
+            f"Low {_fmt_inr(lo)}"     if lo else None,
+            f"Target {_fmt_inr(mn)}"  if mn else None,
+            f"High {_fmt_inr(hi)}"    if hi else None,
         ]))
 
     mi_rows = [
-        ("Earnings Date",    "Next quarterly / annual results announcement",          earn_date or "—"),
-        ("Ex-Dividend Date", "Shares go ex-div (early assignment risk for ITM calls)", ex_div   or "—"),
-        ("Board Meeting",    "Next board meeting date",                               board_dt  or "—"),
-        ("AGM",              "Annual General Meeting date",                           agm_date  or "—"),
-        ("Analyst Targets",  f"Consensus price targets from {n_analysts} analysts",  _fmt_targets()),
+        ("Earnings Date",    "Next quarterly / annual results announcement",           earn_date or "—"),
+        ("Ex-Dividend Date", "Shares go ex-div (early assignment risk for ITM calls)", ex_div    or "—"),
+        ("Board Meeting",    "Next board meeting date",                                board_dt  or "—"),
+        ("AGM",              "Annual General Meeting date",                            agm_date  or "—"),
+        ("Analyst Targets",  f"Consensus price targets from {n_analysts} analysts",   _fmt_targets()),
         ("Recommendation",   "Analyst consensus rating",
          (intel.get("analyst_recommendation") or "—").upper()),
     ]
-    mi_df = pd.DataFrame(mi_rows, columns=["Field", "Description", "Value"])
-    st.dataframe(mi_df, use_container_width=True, hide_index=True, height=247)
+    st.markdown(_kv_table_html(mi_rows), unsafe_allow_html=True)
 
     # ── Strike Analysis ───────────────────────────────────────────────────────
     st.markdown('<div class="section-hd">Strike Analysis</div>', unsafe_allow_html=True)
 
     rows = []
     for s in res["strikes"]:
-        cmp_val      = res["cmp"]
-        moneyness    = (s["strike"] - cmp_val) / cmp_val * 100
-        gross        = s.get("gross_premium_total") or 0
-        charges_pct  = (s["charges"]["total"] / gross * 100) if gross > 0 else 0
         rows.append({
-            "Type":          s["strike_type"],
-            "Strike (₹)":    f"₹{s['strike']:,.0f}",
-            "Moneyness":     f"{moneyness:+.1f}%",
-            "Premium (₹)":   f"₹{s['premium']:,.2f}",
-            "IV %":          f"{s['iv']:.1f}%" if s.get("iv") is not None else "—",
-            "Net premium":   _fmt_inr(s["net_premium_total"]),
-            "Charges %":     f"{charges_pct:.1f}%",
-            "Breakeven":     _fmt_inr(s["breakeven"]),
-            "Max profit":    _fmt_inr(s["max_profit_total"]),
-            "Yield %":       f"{s['premium_yield_pct']:.2f}%",
-            "Ann. yield %":  (f"{s['annualised_yield_pct']:.1f}%"
-                              if s["annualised_yield_pct"] is not None else "—"),
-            "Downside prot.":f"{s['downside_protection_pct']:.2f}%",
-            "OI":            f"{s['open_interest']:,}" if s.get("open_interest") is not None else "—",
-            "Volume":        f"{s['volume']:,}"        if s.get("volume")        is not None else "—",
+            "Type":           s["strike_type"],
+            "Strike (₹)":     f"₹{s['strike']:,.0f}",
+            "Premium (₹)":    f"₹{s['premium']:,.2f}",
+            "Net premium":    _fmt_inr(s["net_premium_total"]),
+            "Breakeven":      _fmt_inr(s["breakeven"]),
+            "Max profit":     _fmt_inr(s["max_profit_total"]),
+            "Yield %":        f"{s['premium_yield_pct']:.2f}%",
+            "Ann. yield %":   (f"{s['annualised_yield_pct']:.1f}%"
+                               if s["annualised_yield_pct"] is not None else "—"),
+            "Downside prot.": f"{s['downside_protection_pct']:.2f}%",
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, height=185)
 
