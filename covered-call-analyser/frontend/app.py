@@ -306,6 +306,25 @@ def _fetch_intel_claude(symbol: str, nse_symbol: str, cmp: float, bypass_intel: 
             atr_14=round(cmp * 0.018, 2),
             hv_20_pct=22.0,
             sector_hv=18.5,
+            key_support=round(cmp * 0.94, 2),
+            key_resistance=round(cmp * 1.07, 2),
+            momentum_outlook="neutral",
+            rr_itm=(
+                f"ITM call offers ~6% downside buffer; max profit capped at premium "
+                f"if stock stays above ₹{round(cmp * 0.96):,.0f}."
+            ),
+            rr_atm=(
+                f"ATM call balances yield and protection; profitable at expiry "
+                f"if stock holds near ₹{round(cmp):,.0f}."
+            ),
+            rr_otm1=(
+                f"OTM+1 targets ~3% upside to ₹{round(cmp * 1.03):,.0f}; "
+                f"higher yield but less downside cushion."
+            ),
+            rr_otm2=(
+                f"OTM+2 targets ~6% upside to ₹{round(cmp * 1.06):,.0f}; "
+                f"highest yield potential, minimal protection."
+            ),
             _source="mock", _input_tokens=0, _output_tokens=0, _cost_usd=0.0,
         )
 
@@ -340,12 +359,21 @@ Return ONLY a valid JSON object with these exact keys (use null for unknown/unce
   "agm_date": <string "DD Mon YYYY" — next AGM date after {today}, or null>,
   "atr_14": <number — estimated 14-day Average True Range in ₹ (typical daily price swing)>,
   "hv_20_pct": <number — estimated annualised 20-day historical volatility as percentage, e.g. 25.5>,
-  "sector_hv": <number — estimated annualised 20-day HV % for the matching Nifty sector index>
+  "sector_hv": <number — estimated annualised 20-day HV % for the matching Nifty sector index>,
+  "key_support": <number — nearest meaningful technical support level in ₹ below CMP>,
+  "key_resistance": <number — nearest meaningful technical resistance level in ₹ above CMP>,
+  "momentum_outlook": <string — one of: "bullish", "neutral", "bearish" — 1-month price momentum view>,
+  "rr_itm": <string — 1-sentence risk/reward note for ITM covered call (e.g. high protection vs capped upside)>,
+  "rr_atm": <string — 1-sentence risk/reward note for ATM covered call>,
+  "rr_otm1": <string — 1-sentence risk/reward note for OTM+1 covered call>,
+  "rr_otm2": <string — 1-sentence risk/reward note for OTM+2 covered call>
 }}
 
 Rules:
 - All date strings must be after {today}. Use null for past dates or unknown dates.
 - Prices must be consistent with the given CMP of ₹{cmp:.2f}.
+- key_support must be below CMP; key_resistance must be above CMP.
+- rr_* notes must reference specific ₹ levels or % figures where possible.
 - Return ONLY the JSON object, no explanation or markdown."""
 
     import time
@@ -710,10 +738,11 @@ stt_rate  = 0.001
 gst_rate  = 0.18
 
 st.session_state.bypass_intel = st.checkbox(
-    "Bypass Claude AI (use mock data)",
+    "Bypass Claude AI",
     value=st.session_state.bypass_intel,
     help=(
-        "Skip the Claude API call and show placeholder equity data. "
+        "Use mock data instead of calling the Claude API. "
+        "Skips the API call and shows placeholder equity data derived from CMP. "
         "Useful when ANTHROPIC_API_KEY is not set, or to avoid API costs during testing. "
         "Mock values are price-consistent but NOT real market data."
     ),
@@ -853,25 +882,39 @@ if res:
     if _intel_source == "blank":
         _api_key_set = bool(os.environ.get("ANTHROPIC_API_KEY"))
         if not _api_key_set:
-            st.error(
-                "**Claude AI data unavailable** — `ANTHROPIC_API_KEY` is not configured. "
-                "Set it in the Render dashboard (Environment → Add Env Var) and redeploy, "
-                "or enable **Bypass Claude AI** above to use mock data.",
-                icon="🔑",
+            st.checkbox(
+                "⚠️ Claude AI data unavailable — API key not configured",
+                value=False,
+                disabled=True,
+                help=(
+                    "Set `ANTHROPIC_API_KEY` in the Render dashboard "
+                    "(Environment → Add Env Var) and redeploy, "
+                    "or enable **Bypass Claude AI** above to use mock data."
+                ),
+                key="err_no_key_indicator",
             )
         else:
-            st.warning(
-                "**Claude AI data unavailable** — the API returned an error after retries "
-                "(possibly overloaded or rate-limited). "
-                "Fields below show — as placeholders. "
-                "Re-run the analysis in a moment, or enable **Bypass Claude AI** to use mock data.",
-                icon="⚠️",
+            st.checkbox(
+                "⚠️ Claude AI data unavailable — API error, retries exhausted",
+                value=False,
+                disabled=True,
+                help=(
+                    "The API returned an error (possibly overloaded or rate-limited). "
+                    "Re-run the analysis in a moment, "
+                    "or enable **Bypass Claude AI** above to use mock data."
+                ),
+                key="err_api_error_indicator",
             )
     elif _intel_source == "mock":
-        st.info(
-            "**Bypass mode active** — showing mock data derived from CMP. "
-            "Values are illustrative only and are **not real market data**.",
-            icon="🔶",
+        st.checkbox(
+            "🔶 Bypass mode active — mock data only, not real market data",
+            value=True,
+            disabled=True,
+            help=(
+                "Values are price-consistent placeholders derived from CMP. "
+                "Use the **Bypass Claude AI** toggle above to switch back to live data."
+            ),
+            key="mock_mode_indicator",
         )
 
     wk52_h = intel.get("fifty_two_week_high")
@@ -1059,6 +1102,41 @@ if res:
             "Downside prot.": f"{s['downside_protection_pct']:.2f}%",
         })
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, height=185)
+
+    # ── Risk / Reward Summary ─────────────────────────────────────────────────
+    _sup  = intel.get("key_support")
+    _res  = intel.get("key_resistance")
+    _mom  = intel.get("momentum_outlook")
+    _rr   = {
+        "ITM":   intel.get("rr_itm"),
+        "ATM":   intel.get("rr_atm"),
+        "OTM+1": intel.get("rr_otm1"),
+        "OTM+2": intel.get("rr_otm2"),
+    }
+    _rr_available = any(_rr.values()) or _sup or _res or _mom
+    if _rr_available:
+        rr_rows = []
+        if _sup or _res:
+            rr_rows.append((
+                "Support / Resistance",
+                "Nearest technical levels that define the price range for the trade",
+                f"{_fmt_inr(_sup)} / {_fmt_inr(_res)}",
+            ))
+        if _mom:
+            _mom_icon = {"bullish": "▲", "neutral": "▶", "bearish": "▼"}.get(_mom, "")
+            rr_rows.append((
+                "Momentum (1 month)",
+                "Short-term price momentum outlook",
+                f"{_mom_icon} {_mom.capitalize()}",
+            ))
+        for stype, note in _rr.items():
+            if note:
+                rr_rows.append((f"{stype} Call R/R", f"Risk/reward for {stype} covered call", note))
+        st.markdown(_kv_table_html(rr_rows), unsafe_allow_html=True)
+        if _intel_source == "claude_api":
+            st.caption("⚡ Risk/reward notes estimated by Claude AI — verify before trading.")
+        elif _intel_source == "mock":
+            st.caption("🔶 Mock R/R notes — not real analysis.")
 
     # ── P&L payoff chart ──────────────────────────────────────────────────────
     st.markdown('<div class="section-hd">P&L Payoff</div>', unsafe_allow_html=True)
