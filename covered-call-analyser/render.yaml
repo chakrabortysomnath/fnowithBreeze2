@@ -82,3 +82,9 @@ services:
       # (Render assigns this automatically — check the backend service dashboard)
       - key: BACKEND_URL
         value: https://covered-call-backend.onrender.com
+
+      # Health-check URL polled on every page load to show Breeze connection status.
+      # Defaults to BACKEND_URL/health when unset.
+      # Set to empty string "" to disable the connection banner entirely.
+      - key: PING_URL
+        value: https://covered-call-backend.onrender.com/health

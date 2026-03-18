@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000").rstrip("/")
 
+# PING_URL — health-check URL polled on every page load to show connection status.
+# Defaults to BACKEND_URL/health.  Set to empty string "" to disable the ping banner.
+PING_URL = os.environ.get("PING_URL", f"{BACKEND_URL}/health").strip()
+
 STRIKE_COLORS = {
     "ITM":   "#6A8FBF",
     "ATM":   "#58A6FF",
@@ -64,14 +68,15 @@ st.markdown("""
 
 # ── Backend health ────────────────────────────────────────────────────────────
 
-try:
-    h = requests.get(f"{BACKEND_URL}/health", timeout=5).json()
-    if h.get("breeze_connected"):
-        st.success("● Breeze connected")
-    else:
-        st.warning("⚠ Backend reachable — Breeze disconnected. Refresh session token.")
-except Exception:
-    st.error("✕ Backend unreachable")
+if PING_URL:
+    try:
+        h = requests.get(PING_URL, timeout=5).json()
+        if h.get("breeze_connected"):
+            st.success("● Breeze connected")
+        else:
+            st.warning("⚠ Backend reachable — Breeze disconnected. Refresh session token.")
+    except Exception:
+        st.error("✕ Backend unreachable")
 
 # ── Session state ─────────────────────────────────────────────────────────────
 
@@ -159,29 +164,46 @@ def _fetch_analyse(payload: dict) -> dict:
     return r.json()
 
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=3600)
 def _fetch_ohlc(ticker: str) -> pd.DataFrame | None:
-    """Fetch 30-day daily OHLC from yfinance. ticker is a resolved yfinance symbol."""
+    """Fetch 30-day daily OHLC from yfinance. ticker is a resolved yfinance symbol.
+
+    Retries up to 3 times with exponential back-off on rate-limit errors.
+    TTL set to 3600s to reduce Render shared-IP throttling.
+    """
+    import time
     import yfinance as yf
     criteria = f"ticker={ticker} period=1mo interval=1d"
     source   = "yfinance/download"
-    try:
-        df = yf.download(ticker, period="1mo", interval="1d",
-                         progress=False, auto_adjust=True)
-        if df.empty:
-            logger.warning(
-                f"Data Collect for {ticker} failed, "
-                f"SEARCHED WITH - {criteria}, SOURCE - {source}"
-            )
-            return None
-        df.index = pd.to_datetime(df.index)
-        return df
-    except Exception as exc:
-        logger.warning(
-            f"Data Collect for {ticker} failed, "
-            f"SEARCHED WITH - {criteria}, SOURCE - {source} | error: {exc}"
-        )
-        return None
+    for attempt in range(3):
+        try:
+            df = yf.download(ticker, period="1mo", interval="1d",
+                             progress=False, auto_adjust=True)
+            if df.empty:
+                logger.warning(
+                    f"Data Collect for {ticker} failed (empty, attempt {attempt+1}), "
+                    f"SEARCHED WITH - {criteria}, SOURCE - {source}"
+                )
+                return None
+            df.index = pd.to_datetime(df.index)
+            return df
+        except Exception as exc:
+            exc_s = str(exc).lower()
+            if ("rate" in exc_s or "too many" in exc_s) and attempt < 2:
+                wait = 2 ** (attempt + 1)
+                logger.warning(
+                    f"Data Collect for {ticker} rate-limited (attempt {attempt+1}), "
+                    f"retrying in {wait}s | SEARCHED WITH - {criteria}, SOURCE - {source} "
+                    f"| error: {exc}"
+                )
+                time.sleep(wait)
+            else:
+                logger.warning(
+                    f"Data Collect for {ticker} failed (attempt {attempt+1}), "
+                    f"SEARCHED WITH - {criteria}, SOURCE - {source} | error: {exc}"
+                )
+                return None
+    return None
 
 
 @st.cache_data(ttl=60)
@@ -371,6 +393,12 @@ def _fetch_nse_actions(nse_symbol: str) -> dict:
         )
         r.raise_for_status()
         actions = r.json()
+
+        raw_count = len(actions) if isinstance(actions, list) else type(actions).__name__
+        logger.warning(
+            f"Data Collect for {nse_symbol} - NSE API returned {raw_count} raw actions, "
+            f"SEARCHED WITH - {criteria}, SOURCE - {source}"
+        )
 
         today  = datetime.date.today()
         result = dict(blank)
@@ -826,6 +854,12 @@ if res:
     # (strike_price=0 on the full chain doesn't return IV/OI/Volume from Breeze)
     opt_q = _fetch_option_quote(res["symbol"], res["expiry_date"], sel_s["strike"])
 
+    # Fall back to chain data when the specific quote returns None
+    iv_val  = opt_q.get("iv")            if opt_q.get("iv")            is not None else sel_s.get("iv")
+    oi_val  = opt_q.get("open_interest") if opt_q.get("open_interest") is not None else sel_s.get("open_interest")
+    vol_val = opt_q.get("volume")        if opt_q.get("volume")        is not None else sel_s.get("volume")
+    ltp_val = opt_q.get("ltp")           if opt_q.get("ltp")           else           sel_s.get("premium")
+
     gross       = sel_s.get("gross_premium_total") or 0
     moneyness   = (sel_s["strike"] - res["cmp"]) / res["cmp"] * 100
     charges_pct = (sel_s["charges"]["total"] / gross * 100) if gross > 0 else 0
@@ -833,16 +867,16 @@ if res:
     opt_rows = [
         ("IV %",
          "Implied Volatility — the market's expectation of future price movement for this strike",
-         f"{opt_q['iv']:.1f}%" if opt_q.get("iv") is not None else "—"),
+         f"{iv_val:.1f}%" if iv_val is not None else "—"),
         ("Open Interest",
          "Total outstanding contracts at this strike — proxy for liquidity",
-         f"{opt_q['open_interest']:,}" if opt_q.get("open_interest") is not None else "—"),
+         f"{oi_val:,}" if oi_val is not None else "—"),
         ("Volume",
          "Number of contracts traded today at this strike",
-         f"{opt_q['volume']:,}" if opt_q.get("volume") is not None else "—"),
+         f"{vol_val:,}" if vol_val is not None else "—"),
         ("LTP (premium)",
          "Last traded price of this call option (cross-check against analyse result)",
-         _fmt_inr(opt_q.get("ltp"))),
+         _fmt_inr(ltp_val)),
         ("Moneyness %",
          "Strike distance from CMP — negative means ITM, positive means OTM",
          f"{moneyness:+.1f}%"),
@@ -946,7 +980,7 @@ if res:
                                if s["annualised_yield_pct"] is not None else "—"),
             "Downside prot.": f"{s['downside_protection_pct']:.2f}%",
         })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, height=185)
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, height=185)
 
     # ── P&L payoff chart ──────────────────────────────────────────────────────
     st.markdown('<div class="section-hd">P&L Payoff</div>', unsafe_allow_html=True)
@@ -995,4 +1029,4 @@ else:
          "Downside protect.": "-"}
         for t in ("ITM", "ATM", "OTM+1", "OTM+2")
     ])
-    st.dataframe(placeholder, use_container_width=True, hide_index=True, height=185)
+    st.dataframe(placeholder, width="stretch", hide_index=True, height=185)
