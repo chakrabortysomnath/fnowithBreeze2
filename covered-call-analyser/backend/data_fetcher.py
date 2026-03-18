@@ -569,6 +569,20 @@ def get_option_quote(symbol: str, expiry_date: str, strike: float) -> dict:
     oi_raw  = raw.get("open_interest") or raw.get("openInterest")
     vol_raw = raw.get("volume") or raw.get("total_quantity_traded")
 
+    # Diagnostic log when any key field is missing — reveals actual Breeze field names
+    if iv_raw is None or oi_raw is None or vol_raw is None:
+        logger.warning(
+            f"get_option_quote {symbol} strike={strike} — some fields blank after parsing. "
+            f"Raw keys: {list(raw.keys())} | "
+            f"implied_volatility={raw.get('implied_volatility')!r} "
+            f"iv={raw.get('iv')!r} "
+            f"open_interest={raw.get('open_interest')!r} "
+            f"openInterest={raw.get('openInterest')!r} "
+            f"volume={raw.get('volume')!r} "
+            f"total_quantity_traded={raw.get('total_quantity_traded')!r} "
+            f"ltp={raw.get('ltp')!r}"
+        )
+
     try:
         ltp = float(ltp_raw) if ltp_raw is not None else 0.0
     except (TypeError, ValueError):

@@ -179,14 +179,23 @@ def _fetch_ohlc(ticker: str) -> pd.DataFrame | None:
         try:
             df = yf.download(ticker, period="1mo", interval="1d",
                              progress=False, auto_adjust=True)
-            if df.empty:
+            if not df.empty:
+                df.index = pd.to_datetime(df.index)
+                return df
+            # yfinance swallows rate-limit errors and returns empty DF — treat as retriable
+            if attempt < 2:
+                wait = 2 ** (attempt + 1)
                 logger.warning(
-                    f"Data Collect for {ticker} failed (empty, attempt {attempt+1}), "
-                    f"SEARCHED WITH - {criteria}, SOURCE - {source}"
+                    f"Data Collect for {ticker} rate-limit/empty (attempt {attempt+1}), "
+                    f"retrying in {wait}s | SEARCHED WITH - {criteria}, SOURCE - {source}"
                 )
-                return None
-            df.index = pd.to_datetime(df.index)
-            return df
+                time.sleep(wait)
+                continue
+            logger.warning(
+                f"Data Collect for {ticker} failed (empty after {attempt+1} attempts), "
+                f"SEARCHED WITH - {criteria}, SOURCE - {source}"
+            )
+            return None
         except Exception as exc:
             exc_s = str(exc).lower()
             if ("rate" in exc_s or "too many" in exc_s) and attempt < 2:
@@ -282,8 +291,10 @@ def _fetch_intel(ticker: str) -> dict:
     """Fetch equity fundamentals, analyst targets and event dates via yfinance.
 
     ticker: resolved yfinance ticker e.g. 'RELIANCE.NS' or '^NSEI'.
+    Retries up to 3 times on rate-limit errors with exponential back-off.
     Returns an all-None dict on any failure so callers need no error handling.
     """
+    import time
     import yfinance as yf
     criteria = f"ticker={ticker}"
     source   = "yfinance/Ticker.info"
@@ -295,74 +306,86 @@ def _fetch_intel(ticker: str) -> dict:
         analyst_target_high=None,
         analyst_recommendation=None, analyst_count=None,
     )
-    try:
-        logger.warning(
-            f"Data Collect for {ticker} - starting yfinance fetch, "
-            f"SEARCHED WITH - {criteria}, SOURCE - {source}"
-        )
-        t_obj = yf.Ticker(ticker)
-        info  = t_obj.info
-        logger.warning(
-            f"Data Collect for {ticker} - yfinance info returned {len(info)} fields, "
-            f"SEARCHED WITH - {criteria}, SOURCE - {source} | "
-            f"quoteType={info.get('quoteType')!r} "
-            f"exchange={info.get('exchange')!r} "
-            f"currency={info.get('currency')!r} | "
-            f"key_fields: "
-            f"fiftyTwoWeekHigh={info.get('fiftyTwoWeekHigh')!r} "
-            f"fiftyTwoWeekLow={info.get('fiftyTwoWeekLow')!r} "
-            f"beta={info.get('beta')!r} "
-            f"sector={info.get('sector')!r} "
-            f"regularMarketPrice={info.get('regularMarketPrice')!r}"
-        )
-        result = {
-            "fifty_two_week_high":   info.get("fiftyTwoWeekHigh"),
-            "fifty_two_week_low":    info.get("fiftyTwoWeekLow"),
-            "beta":                  info.get("beta"),
-            "sector":                info.get("sector"),
-            "industry":              info.get("industry"),
-            "analyst_target_low":    info.get("targetLowPrice"),
-            "analyst_target_mean":   info.get("targetMeanPrice"),
-            "analyst_target_high":   info.get("targetHighPrice"),
-            "analyst_recommendation":info.get("recommendationKey"),
-            "analyst_count":         info.get("numberOfAnalystOpinions"),
-            "earnings_date":         None,
-            "ex_dividend_date":      None,
-        }
-        ex_ts = info.get("exDividendDate")
-        if ex_ts:
-            result["ex_dividend_date"] = datetime.datetime.fromtimestamp(
-                int(ex_ts)).strftime("%d %b %Y")
+    for attempt in range(3):
         try:
-            cal = t_obj.calendar
-            if cal and "Earnings Date" in cal:
-                dates = cal["Earnings Date"]
-                d = dates[0] if isinstance(dates, list) else dates
-                result["earnings_date"] = pd.Timestamp(d).strftime("%d %b %Y")
-        except Exception:
-            pass
+            logger.warning(
+                f"Data Collect for {ticker} - starting yfinance fetch (attempt {attempt+1}), "
+                f"SEARCHED WITH - {criteria}, SOURCE - {source}"
+            )
+            t_obj = yf.Ticker(ticker)
+            info  = t_obj.info
+            logger.warning(
+                f"Data Collect for {ticker} - yfinance info returned {len(info)} fields, "
+                f"SEARCHED WITH - {criteria}, SOURCE - {source} | "
+                f"quoteType={info.get('quoteType')!r} "
+                f"exchange={info.get('exchange')!r} "
+                f"currency={info.get('currency')!r} | "
+                f"key_fields: "
+                f"fiftyTwoWeekHigh={info.get('fiftyTwoWeekHigh')!r} "
+                f"fiftyTwoWeekLow={info.get('fiftyTwoWeekLow')!r} "
+                f"beta={info.get('beta')!r} "
+                f"sector={info.get('sector')!r} "
+                f"regularMarketPrice={info.get('regularMarketPrice')!r}"
+            )
+            result = {
+                "fifty_two_week_high":   info.get("fiftyTwoWeekHigh"),
+                "fifty_two_week_low":    info.get("fiftyTwoWeekLow"),
+                "beta":                  info.get("beta"),
+                "sector":                info.get("sector"),
+                "industry":              info.get("industry"),
+                "analyst_target_low":    info.get("targetLowPrice"),
+                "analyst_target_mean":   info.get("targetMeanPrice"),
+                "analyst_target_high":   info.get("targetHighPrice"),
+                "analyst_recommendation":info.get("recommendationKey"),
+                "analyst_count":         info.get("numberOfAnalystOpinions"),
+                "earnings_date":         None,
+                "ex_dividend_date":      None,
+            }
+            ex_ts = info.get("exDividendDate")
+            if ex_ts:
+                result["ex_dividend_date"] = datetime.datetime.fromtimestamp(
+                    int(ex_ts)).strftime("%d %b %Y")
+            try:
+                cal = t_obj.calendar
+                if cal and "Earnings Date" in cal:
+                    dates = cal["Earnings Date"]
+                    d = dates[0] if isinstance(dates, list) else dates
+                    result["earnings_date"] = pd.Timestamp(d).strftime("%d %b %Y")
+            except Exception:
+                pass
 
-        # Warn for each blank critical field
-        for field, label in [
-            ("fifty_two_week_high", "52-week high"),
-            ("fifty_two_week_low",  "52-week low"),
-            ("beta",                "beta"),
-            ("earnings_date",       "earnings date"),
-            ("ex_dividend_date",    "ex-dividend date"),
-            ("analyst_target_mean", "analyst target mean"),
-        ]:
-            if result.get(field) is None:
+            # Warn for each blank critical field
+            for field, label in [
+                ("fifty_two_week_high", "52-week high"),
+                ("fifty_two_week_low",  "52-week low"),
+                ("beta",                "beta"),
+                ("earnings_date",       "earnings date"),
+                ("ex_dividend_date",    "ex-dividend date"),
+                ("analyst_target_mean", "analyst target mean"),
+            ]:
+                if result.get(field) is None:
+                    logger.warning(
+                        f"Data Collect for {ticker} [{label}] blank, "
+                        f"SEARCHED WITH - {criteria}, SOURCE - {source}"
+                    )
+            return result
+        except Exception as exc:
+            exc_s = str(exc).lower()
+            if ("rate" in exc_s or "too many" in exc_s) and attempt < 2:
+                wait = 2 ** (attempt + 1)
                 logger.warning(
-                    f"Data Collect for {ticker} [{label}] blank, "
-                    f"SEARCHED WITH - {criteria}, SOURCE - {source}"
+                    f"Data Collect for {ticker} rate-limited (attempt {attempt+1}), "
+                    f"retrying in {wait}s | SEARCHED WITH - {criteria}, SOURCE - {source} "
+                    f"| error: {exc}"
                 )
-        return result
-    except Exception as exc:
-        logger.warning(
-            f"Data Collect for {ticker} failed, "
-            f"SEARCHED WITH - {criteria}, SOURCE - {source} | error: {exc}"
-        )
-        return blank
+                time.sleep(wait)
+            else:
+                logger.warning(
+                    f"Data Collect for {ticker} failed (attempt {attempt+1}), "
+                    f"SEARCHED WITH - {criteria}, SOURCE - {source} | error: {exc}"
+                )
+                return blank
+    return blank
 
 
 @st.cache_data(ttl=3600)
@@ -413,12 +436,14 @@ def _fetch_nse_actions(nse_symbol: str) -> dict:
                     continue
             return None
 
+        past_skipped = 0
         for action in sorted(actions, key=lambda a: a.get("exDate", "")):
             subj    = action.get("subject", "").lower()
             ex_raw  = action.get("exDate", "") or action.get("exdividendDate", "")
             rec_raw = action.get("recDate", "")
             d = _parse(ex_raw) or _parse(rec_raw)
             if not d or d < today:
+                past_skipped += 1
                 continue
             ds = d.strftime("%d %b %Y")
             if "dividend" in subj and not result["ex_dividend_date"]:
@@ -431,6 +456,14 @@ def _fetch_nse_actions(nse_symbol: str) -> dict:
                 "quarterly results", "financial results", "half yearly results"
             )) and not result["earnings_date"]:
                 result["earnings_date"] = ds
+
+        future_found = sum(1 for v in result.values() if v)
+        logger.warning(
+            f"Data Collect for {nse_symbol} - NSE actions filter: "
+            f"{raw_count} raw, {past_skipped} past-dated skipped, "
+            f"{future_found} future events found, "
+            f"SEARCHED WITH - {criteria}, SOURCE - {source}"
+        )
 
         # Warn for each blank corporate event
         for field, label in [
