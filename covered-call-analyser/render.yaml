@@ -88,3 +88,10 @@ services:
       # Set to empty string "" to disable the connection banner entirely.
       - key: PING_URL
         value: https://covered-call-backend.onrender.com/health
+
+      # Anthropic API key — used by _fetch_intel_claude() to fetch equity intel and
+      # market intelligence via Claude API (replaces yfinance + NSE which are
+      # rate-limited on Render's shared IP).
+      # Set manually in the Render dashboard — never stored in git.
+      - key: ANTHROPIC_API_KEY
+        sync: false

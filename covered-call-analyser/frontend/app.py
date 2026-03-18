@@ -253,6 +253,99 @@ def _fetch_option_quote(symbol: str, expiry_date: str, strike: float) -> dict:
         return blank
 
 
+@st.cache_data(ttl=3600)
+def _fetch_intel_claude(symbol: str, nse_symbol: str, cmp: float) -> dict:
+    """Fetch equity fundamentals, analyst targets, corporate events and technicals via Claude API.
+
+    Replaces both _fetch_intel (yfinance Ticker.info) and _fetch_nse_actions (NSE API),
+    both of which are rate-limited on Render.com shared IPs.
+    Returns all-None dict on failure so callers need no error handling.
+    """
+    import json
+    import anthropic
+
+    blank = dict(
+        fifty_two_week_high=None, fifty_two_week_low=None,
+        beta=None, sector=None, industry=None,
+        analyst_target_low=None, analyst_target_mean=None,
+        analyst_target_high=None,
+        analyst_recommendation=None, analyst_count=None,
+        earnings_date=None, ex_dividend_date=None,
+        agm_date=None, board_meeting_date=None,
+        atr_14=None, hv_20_pct=None, sector_hv=None,
+    )
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        logger.warning(
+            f"Data Collect for {nse_symbol} - ANTHROPIC_API_KEY not set, "
+            f"skipping Claude intel fetch"
+        )
+        return blank
+
+    today = datetime.date.today().strftime("%d %b %Y")
+    prompt = f"""You are a financial data assistant for Indian NSE equities.
+Provide data for the stock: {nse_symbol} (F&O code: {symbol}, listed on NSE India).
+Current market price as of {today}: ₹{cmp:.2f}
+
+Return ONLY a valid JSON object with these exact keys (use null for unknown/uncertain values):
+{{
+  "fifty_two_week_high": <number — 52-week high closing price in ₹, estimated from your knowledge>,
+  "fifty_two_week_low": <number — 52-week low closing price in ₹>,
+  "beta": <number — beta relative to Nifty 50, typically 0.5–2.0>,
+  "sector": <string — one of: "Consumer Staples", "Consumer Discretionary", "Technology", "Financial Services", "Healthcare", "Energy", "Basic Materials", "Industrials", "Real Estate", "Communication Services", or null>,
+  "industry": <string — specific industry sub-classification>,
+  "analyst_target_low": <number — lowest analyst 12-month price target in ₹>,
+  "analyst_target_mean": <number — consensus analyst 12-month price target in ₹>,
+  "analyst_target_high": <number — highest analyst 12-month price target in ₹>,
+  "analyst_recommendation": <string — one of: "strong_buy", "buy", "hold", "underperform", "sell">,
+  "analyst_count": <integer — approximate number of analysts covering the stock>,
+  "earnings_date": <string "DD Mon YYYY" — next quarterly/annual results announcement date after {today}, or null>,
+  "ex_dividend_date": <string "DD Mon YYYY" — next ex-dividend date after {today}, or null>,
+  "board_meeting_date": <string "DD Mon YYYY" — next board meeting date after {today}, or null>,
+  "agm_date": <string "DD Mon YYYY" — next AGM date after {today}, or null>,
+  "atr_14": <number — estimated 14-day Average True Range in ₹ (typical daily price swing)>,
+  "hv_20_pct": <number — estimated annualised 20-day historical volatility as percentage, e.g. 25.5>,
+  "sector_hv": <number — estimated annualised 20-day HV % for the matching Nifty sector index>
+}}
+
+Rules:
+- All date strings must be after {today}. Use null for past dates or unknown dates.
+- Prices must be consistent with the given CMP of ₹{cmp:.2f}.
+- Return ONLY the JSON object, no explanation or markdown."""
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = msg.content[0].text.strip()
+        # Strip markdown code fences if present
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            raw = parts[1] if len(parts) > 1 else raw
+            if raw.startswith("json"):
+                raw = raw[4:]
+        data = json.loads(raw.strip())
+        result = dict(blank)
+        for key in blank:
+            val = data.get(key)
+            if val is not None:
+                result[key] = val
+        populated = sum(1 for v in result.values() if v is not None)
+        logger.warning(
+            f"Data Collect for {nse_symbol} - Claude API intel returned "
+            f"{populated} populated fields, SOURCE - Claude API / claude-opus-4-6"
+        )
+        return result
+    except Exception as exc:
+        logger.warning(
+            f"Data Collect for {nse_symbol} Claude API intel failed | error: {exc}"
+        )
+        return blank
+
+
 def _fmt_inr(v) -> str:
     if v is None:
         return "-"
@@ -286,211 +379,29 @@ _SECTOR_INDEX: dict[str, str] = {
 }
 
 
-@st.cache_data(ttl=1800)
-def _fetch_intel(ticker: str) -> dict:
-    """Fetch equity fundamentals, analyst targets and event dates via yfinance.
+def _compute_technicals(
+    ohlc: pd.DataFrame | None,
+    symbol: str = "unknown",
+    claude_estimates: dict | None = None,
+) -> dict:
+    """Compute ATR-14 and annualised HV-20 from a daily OHLC dataframe.
 
-    ticker: resolved yfinance ticker e.g. 'RELIANCE.NS' or '^NSEI'.
-    Retries up to 3 times on rate-limit errors with exponential back-off.
-    Returns an all-None dict on any failure so callers need no error handling.
+    Falls back to claude_estimates when OHLC is unavailable (e.g. yfinance rate-limited).
     """
-    import time
-    import yfinance as yf
-    criteria = f"ticker={ticker}"
-    source   = "yfinance/Ticker.info"
-    blank = dict(
-        fifty_two_week_high=None, fifty_two_week_low=None,
-        beta=None, sector=None, industry=None,
-        earnings_date=None, ex_dividend_date=None,
-        analyst_target_low=None, analyst_target_mean=None,
-        analyst_target_high=None,
-        analyst_recommendation=None, analyst_count=None,
-    )
-    for attempt in range(3):
-        try:
-            logger.warning(
-                f"Data Collect for {ticker} - starting yfinance fetch (attempt {attempt+1}), "
-                f"SEARCHED WITH - {criteria}, SOURCE - {source}"
-            )
-            t_obj = yf.Ticker(ticker)
-            info  = t_obj.info
-            logger.warning(
-                f"Data Collect for {ticker} - yfinance info returned {len(info)} fields, "
-                f"SEARCHED WITH - {criteria}, SOURCE - {source} | "
-                f"quoteType={info.get('quoteType')!r} "
-                f"exchange={info.get('exchange')!r} "
-                f"currency={info.get('currency')!r} | "
-                f"key_fields: "
-                f"fiftyTwoWeekHigh={info.get('fiftyTwoWeekHigh')!r} "
-                f"fiftyTwoWeekLow={info.get('fiftyTwoWeekLow')!r} "
-                f"beta={info.get('beta')!r} "
-                f"sector={info.get('sector')!r} "
-                f"regularMarketPrice={info.get('regularMarketPrice')!r}"
-            )
-            result = {
-                "fifty_two_week_high":   info.get("fiftyTwoWeekHigh"),
-                "fifty_two_week_low":    info.get("fiftyTwoWeekLow"),
-                "beta":                  info.get("beta"),
-                "sector":                info.get("sector"),
-                "industry":              info.get("industry"),
-                "analyst_target_low":    info.get("targetLowPrice"),
-                "analyst_target_mean":   info.get("targetMeanPrice"),
-                "analyst_target_high":   info.get("targetHighPrice"),
-                "analyst_recommendation":info.get("recommendationKey"),
-                "analyst_count":         info.get("numberOfAnalystOpinions"),
-                "earnings_date":         None,
-                "ex_dividend_date":      None,
-            }
-            ex_ts = info.get("exDividendDate")
-            if ex_ts:
-                result["ex_dividend_date"] = datetime.datetime.fromtimestamp(
-                    int(ex_ts)).strftime("%d %b %Y")
-            try:
-                cal = t_obj.calendar
-                if cal and "Earnings Date" in cal:
-                    dates = cal["Earnings Date"]
-                    d = dates[0] if isinstance(dates, list) else dates
-                    result["earnings_date"] = pd.Timestamp(d).strftime("%d %b %Y")
-            except Exception:
-                pass
-
-            # Warn for each blank critical field
-            for field, label in [
-                ("fifty_two_week_high", "52-week high"),
-                ("fifty_two_week_low",  "52-week low"),
-                ("beta",                "beta"),
-                ("earnings_date",       "earnings date"),
-                ("ex_dividend_date",    "ex-dividend date"),
-                ("analyst_target_mean", "analyst target mean"),
-            ]:
-                if result.get(field) is None:
-                    logger.warning(
-                        f"Data Collect for {ticker} [{label}] blank, "
-                        f"SEARCHED WITH - {criteria}, SOURCE - {source}"
-                    )
-            return result
-        except Exception as exc:
-            exc_s = str(exc).lower()
-            if ("rate" in exc_s or "too many" in exc_s) and attempt < 2:
-                wait = 2 ** (attempt + 1)
-                logger.warning(
-                    f"Data Collect for {ticker} rate-limited (attempt {attempt+1}), "
-                    f"retrying in {wait}s | SEARCHED WITH - {criteria}, SOURCE - {source} "
-                    f"| error: {exc}"
-                )
-                time.sleep(wait)
-            else:
-                logger.warning(
-                    f"Data Collect for {ticker} failed (attempt {attempt+1}), "
-                    f"SEARCHED WITH - {criteria}, SOURCE - {source} | error: {exc}"
-                )
-                return blank
-    return blank
-
-
-@st.cache_data(ttl=3600)
-def _fetch_nse_actions(nse_symbol: str) -> dict:
-    """Fetch upcoming corporate actions from NSE (board meetings, AGM, dividends).
-
-    Hits the NSE unofficial API with a cookie-warm-up session.
-    Returns all-None dict gracefully on failure.
-    """
-    criteria = f"index=equities symbol={nse_symbol.upper()}"
-    source   = "nseindia.com/api/corporates-corporateActions"
-    blank = dict(earnings_date=None, ex_dividend_date=None,
-                 agm_date=None, board_meeting_date=None)
-    try:
-        s = requests.Session()
-        s.headers.update({
-            "User-Agent":      ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                "AppleWebKit/537.36 Chrome/120.0.0 Safari/537.36"),
-            "Referer":         "https://www.nseindia.com",
-            "Accept-Language": "en-US,en;q=0.9",
-        })
-        s.get("https://www.nseindia.com", timeout=8)   # warm-up for cookies
-
-        r = s.get(
-            "https://www.nseindia.com/api/corporates-corporateActions",
-            params={"index": "equities", "symbol": nse_symbol.upper()},
-            timeout=8,
-        )
-        r.raise_for_status()
-        actions = r.json()
-
-        raw_count = len(actions) if isinstance(actions, list) else type(actions).__name__
-        logger.warning(
-            f"Data Collect for {nse_symbol} - NSE API returned {raw_count} raw actions, "
-            f"SEARCHED WITH - {criteria}, SOURCE - {source}"
-        )
-
-        today  = datetime.date.today()
-        result = dict(blank)
-
-        def _parse(raw: str) -> datetime.date | None:
-            if not raw or raw.strip() in ("-", ""):
-                return None
-            for fmt in ("%d-%b-%Y", "%Y-%m-%d", "%d-%B-%Y"):
-                try:
-                    return datetime.datetime.strptime(raw.strip(), fmt).date()
-                except ValueError:
-                    continue
-            return None
-
-        past_skipped = 0
-        for action in sorted(actions, key=lambda a: a.get("exDate", "")):
-            subj    = action.get("subject", "").lower()
-            ex_raw  = action.get("exDate", "") or action.get("exdividendDate", "")
-            rec_raw = action.get("recDate", "")
-            d = _parse(ex_raw) or _parse(rec_raw)
-            if not d or d < today:
-                past_skipped += 1
-                continue
-            ds = d.strftime("%d %b %Y")
-            if "dividend" in subj and not result["ex_dividend_date"]:
-                result["ex_dividend_date"] = ds
-            elif ("agm" in subj or "annual general" in subj) and not result["agm_date"]:
-                result["agm_date"] = ds
-            elif "board meeting" in subj and not result["board_meeting_date"]:
-                result["board_meeting_date"] = ds
-            elif any(k in subj for k in (
-                "quarterly results", "financial results", "half yearly results"
-            )) and not result["earnings_date"]:
-                result["earnings_date"] = ds
-
-        future_found = sum(1 for v in result.values() if v)
-        logger.warning(
-            f"Data Collect for {nse_symbol} - NSE actions filter: "
-            f"{raw_count} raw, {past_skipped} past-dated skipped, "
-            f"{future_found} future events found, "
-            f"SEARCHED WITH - {criteria}, SOURCE - {source}"
-        )
-
-        # Warn for each blank corporate event
-        for field, label in [
-            ("earnings_date",      "earnings date"),
-            ("ex_dividend_date",   "ex-dividend date"),
-            ("board_meeting_date", "board meeting date"),
-            ("agm_date",           "AGM date"),
-        ]:
-            if not result.get(field):
-                logger.warning(
-                    f"Data Collect for {nse_symbol} [{label}] blank, "
-                    f"SEARCHED WITH - {criteria}, SOURCE - {source}"
-                )
-        return result
-    except Exception as exc:
-        logger.warning(
-            f"Data Collect for {nse_symbol} failed, "
-            f"SEARCHED WITH - {criteria}, SOURCE - {source} | error: {exc}"
-        )
-        return blank
-
-
-def _compute_technicals(ohlc: pd.DataFrame | None, symbol: str = "unknown") -> dict:
-    """Compute ATR-14 and annualised HV-20 from a daily OHLC dataframe."""
     blank = dict(atr_14=None, hv_20_pct=None)
     rows  = len(ohlc) if ohlc is not None else 0
     if ohlc is None or ohlc.empty or rows < 3:
+        if claude_estimates:
+            fb = {
+                "atr_14":    claude_estimates.get("atr_14"),
+                "hv_20_pct": claude_estimates.get("hv_20_pct"),
+            }
+            if any(v is not None for v in fb.values()):
+                logger.warning(
+                    f"Data Collect for {symbol} [ATR-14, HV-20] using Claude estimates "
+                    f"(ohlc rows={rows}), SOURCE - Claude API"
+                )
+                return fb
         logger.warning(
             f"Data Collect for {symbol} [ATR-14, HV-20] blank, "
             f"SEARCHED WITH - ohlc rows={rows} (need ≥3), "
@@ -769,23 +680,22 @@ if res:
     st.markdown('<div class="section-hd">30-Day Price History</div>',
                 unsafe_allow_html=True)
 
-    nse_map    = _fetch_nse_symbol_map()
-    ticker     = _yf_ticker(res["symbol"], nse_map)
-    ohlc       = _fetch_ohlc(ticker)
-    tech       = _compute_technicals(ohlc, symbol=ticker)
-    intel      = _fetch_intel(ticker)
-    nse_sym    = nse_map.get(res["symbol"].upper(), res["symbol"])
-    nse_acts   = _fetch_nse_actions(nse_sym)
-    sector_hv  = _compute_technicals(
+    nse_map   = _fetch_nse_symbol_map()
+    ticker    = _yf_ticker(res["symbol"], nse_map)
+    nse_sym   = nse_map.get(res["symbol"].upper(), res["symbol"])
+    ohlc      = _fetch_ohlc(ticker)                                        # keep — real prices for chart
+    intel     = _fetch_intel_claude(res["symbol"], nse_sym, res["cmp"])    # replaces _fetch_intel + _fetch_nse_actions
+    tech      = _compute_technicals(ohlc, symbol=ticker, claude_estimates=intel)
+    sector_hv = intel.get("sector_hv") or _compute_technicals(
         _fetch_sector_ohlc(intel.get("sector")),
         symbol=f"sector:{intel.get('sector') or 'unknown'}",
     ).get("hv_20_pct")
 
-    # Prefer NSE corporate actions (more reliable for India); fall back to yfinance
-    earn_date  = nse_acts.get("earnings_date")  or intel.get("earnings_date")
-    ex_div     = nse_acts.get("ex_dividend_date") or intel.get("ex_dividend_date")
-    agm_date   = nse_acts.get("agm_date")
-    board_dt   = nse_acts.get("board_meeting_date")
+    # All event dates from Claude intel
+    earn_date = intel.get("earnings_date")
+    ex_div    = intel.get("ex_dividend_date")
+    agm_date  = intel.get("agm_date")
+    board_dt  = intel.get("board_meeting_date")
 
     if ohlc is not None and not ohlc.empty:
         candle = go.Figure(go.Candlestick(
@@ -846,7 +756,6 @@ if res:
 
     # ── Equity Data ───────────────────────────────────────────────────────────
     st.markdown('<div class="section-hd">Equity Data</div>', unsafe_allow_html=True)
-    st.caption(f"Fetched using yfinance ticker: `{ticker}`")
 
     wk52_h = intel.get("fifty_two_week_high")
     wk52_l = intel.get("fifty_two_week_low")
@@ -861,6 +770,7 @@ if res:
          f"{sector_hv:.1f}%" if sector_hv else "—"),
     ]
     st.markdown(_kv_table_html(ed_rows), unsafe_allow_html=True)
+    st.caption("⚡ Equity data estimated by Claude AI — verify before trading.")
 
     # ── Options API Data ──────────────────────────────────────────────────────
     st.markdown('<div class="section-hd">Options API Data</div>', unsafe_allow_html=True)
@@ -995,6 +905,7 @@ if res:
          (intel.get("analyst_recommendation") or "—").upper()),
     ]
     st.markdown(_kv_table_html(mi_rows), unsafe_allow_html=True)
+    st.caption("⚡ Market intelligence estimated by Claude AI — verify corporate events before trading.")
 
     # ── Strike Analysis ───────────────────────────────────────────────────────
     st.markdown('<div class="section-hd">Strike Analysis</div>', unsafe_allow_html=True)

@@ -5,4 +5,5 @@ requests>=2.31.0
 plotly>=5.22.0        # Phase 4 charts
 pandas>=2.2.0         # Phase 4 dataframes
 fpdf2>=2.7.0,<3.0.0   # Phase 6 PDF report generation (archived)
-yfinance>=0.2          # 30-day candlestick chart
+yfinance>=0.2          # 30-day candlestick chart (rate-limited on Render; Claude API is primary)
+anthropic>=0.40.0      # Claude API — equity intel + market intelligence (replaces yfinance/NSE)
