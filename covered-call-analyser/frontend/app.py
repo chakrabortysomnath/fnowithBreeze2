@@ -254,7 +254,7 @@ def _fetch_option_quote(symbol: str, expiry_date: str, strike: float) -> dict:
         return blank
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86_400)   # 24 h — fundamental equity data changes at most once per day
 def _fetch_intel_claude(symbol: str, nse_symbol: str, cmp: float, bypass_intel: bool = False) -> dict:
     """Fetch equity fundamentals, analyst targets, corporate events and technicals via Claude API.
 
@@ -338,45 +338,53 @@ def _fetch_intel_claude(symbol: str, nse_symbol: str, cmp: float, bypass_intel: 
         )
         return blank
 
+    # Static schema block — extracted so Anthropic can cache it across calls for different stocks.
+    # Only the short user message (stock name, CMP, date) changes per call.
+    _SYSTEM = (
+        "You are a financial data assistant for Indian NSE equities.\n"
+        "Return ONLY a valid JSON object with these exact keys "
+        "(use null for unknown/uncertain values):\n"
+        "{\n"
+        '  "fifty_two_week_high": <number — 52-week high closing price in ₹>,\n'
+        '  "fifty_two_week_low": <number — 52-week low closing price in ₹>,\n'
+        '  "beta": <number — beta relative to Nifty 50, typically 0.5–2.0>,\n'
+        '  "sector": <string — one of: "Consumer Staples", "Consumer Discretionary", '
+        '"Technology", "Financial Services", "Healthcare", "Energy", "Basic Materials", '
+        '"Industrials", "Real Estate", "Communication Services", or null>,\n'
+        '  "industry": <string — specific industry sub-classification>,\n'
+        '  "analyst_target_low": <number — lowest analyst 12-month price target in ₹>,\n'
+        '  "analyst_target_mean": <number — consensus analyst 12-month price target in ₹>,\n'
+        '  "analyst_target_high": <number — highest analyst 12-month price target in ₹>,\n'
+        '  "analyst_recommendation": <string — one of: "strong_buy", "buy", "hold", "underperform", "sell">,\n'
+        '  "analyst_count": <integer — approximate number of analysts covering the stock>,\n'
+        '  "earnings_date": <string "DD Mon YYYY" — next quarterly/annual results date, or null>,\n'
+        '  "ex_dividend_date": <string "DD Mon YYYY" — next ex-dividend date, or null>,\n'
+        '  "board_meeting_date": <string "DD Mon YYYY" — next board meeting date, or null>,\n'
+        '  "agm_date": <string "DD Mon YYYY" — next AGM date, or null>,\n'
+        '  "atr_14": <number — estimated 14-day Average True Range in ₹>,\n'
+        '  "hv_20_pct": <number — estimated annualised 20-day historical volatility %>,\n'
+        '  "sector_hv": <number — estimated annualised 20-day HV % for matching Nifty sector index>,\n'
+        '  "key_support": <number — nearest technical support level in ₹ below CMP>,\n'
+        '  "key_resistance": <number — nearest technical resistance level in ₹ above CMP>,\n'
+        '  "momentum_outlook": <string — one of: "bullish", "neutral", "bearish">,\n'
+        '  "rr_itm": <string — 1-sentence risk/reward note for ITM covered call>,\n'
+        '  "rr_atm": <string — 1-sentence risk/reward note for ATM covered call>,\n'
+        '  "rr_otm1": <string — 1-sentence risk/reward note for OTM+1 covered call>,\n'
+        '  "rr_otm2": <string — 1-sentence risk/reward note for OTM+2 covered call>\n'
+        "}\n"
+        "Rules:\n"
+        "- All date strings must be after TODAY (supplied in the user message). Use null for past/unknown dates.\n"
+        "- key_support must be below CMP; key_resistance must be above CMP.\n"
+        "- rr_* notes must reference specific ₹ levels or % figures where possible.\n"
+        "- Return ONLY the JSON object, no explanation or markdown."
+    )
+
     today = datetime.date.today().strftime("%d %b %Y")
-    prompt = f"""You are a financial data assistant for Indian NSE equities.
-Provide data for the stock: {nse_symbol} (F&O code: {symbol}, listed on NSE India).
-Current market price as of {today}: ₹{cmp:.2f}
-
-Return ONLY a valid JSON object with these exact keys (use null for unknown/uncertain values):
-{{
-  "fifty_two_week_high": <number — 52-week high closing price in ₹, estimated from your knowledge>,
-  "fifty_two_week_low": <number — 52-week low closing price in ₹>,
-  "beta": <number — beta relative to Nifty 50, typically 0.5–2.0>,
-  "sector": <string — one of: "Consumer Staples", "Consumer Discretionary", "Technology", "Financial Services", "Healthcare", "Energy", "Basic Materials", "Industrials", "Real Estate", "Communication Services", or null>,
-  "industry": <string — specific industry sub-classification>,
-  "analyst_target_low": <number — lowest analyst 12-month price target in ₹>,
-  "analyst_target_mean": <number — consensus analyst 12-month price target in ₹>,
-  "analyst_target_high": <number — highest analyst 12-month price target in ₹>,
-  "analyst_recommendation": <string — one of: "strong_buy", "buy", "hold", "underperform", "sell">,
-  "analyst_count": <integer — approximate number of analysts covering the stock>,
-  "earnings_date": <string "DD Mon YYYY" — next quarterly/annual results announcement date after {today}, or null>,
-  "ex_dividend_date": <string "DD Mon YYYY" — next ex-dividend date after {today}, or null>,
-  "board_meeting_date": <string "DD Mon YYYY" — next board meeting date after {today}, or null>,
-  "agm_date": <string "DD Mon YYYY" — next AGM date after {today}, or null>,
-  "atr_14": <number — estimated 14-day Average True Range in ₹ (typical daily price swing)>,
-  "hv_20_pct": <number — estimated annualised 20-day historical volatility as percentage, e.g. 25.5>,
-  "sector_hv": <number — estimated annualised 20-day HV % for the matching Nifty sector index>,
-  "key_support": <number — nearest meaningful technical support level in ₹ below CMP>,
-  "key_resistance": <number — nearest meaningful technical resistance level in ₹ above CMP>,
-  "momentum_outlook": <string — one of: "bullish", "neutral", "bearish" — 1-month price momentum view>,
-  "rr_itm": <string — 1-sentence risk/reward note for ITM covered call (e.g. high protection vs capped upside)>,
-  "rr_atm": <string — 1-sentence risk/reward note for ATM covered call>,
-  "rr_otm1": <string — 1-sentence risk/reward note for OTM+1 covered call>,
-  "rr_otm2": <string — 1-sentence risk/reward note for OTM+2 covered call>
-}}
-
-Rules:
-- All date strings must be after {today}. Use null for past dates or unknown dates.
-- Prices must be consistent with the given CMP of ₹{cmp:.2f}.
-- key_support must be below CMP; key_resistance must be above CMP.
-- rr_* notes must reference specific ₹ levels or % figures where possible.
-- Return ONLY the JSON object, no explanation or markdown."""
+    user_msg = (
+        f"Stock: {nse_symbol} (F&O code: {symbol}, NSE India)\n"
+        f"CMP as of {today}: ₹{cmp:.2f}\n"
+        f"Today's date: {today}"
+    )
 
     import time
     client = anthropic.Anthropic(api_key=api_key)
@@ -387,9 +395,14 @@ Rules:
             time.sleep(2 ** attempt)
         try:
             msg = client.messages.create(
-                model="claude-opus-4-6",
-                max_tokens=1024,
-                messages=[{"role": "user", "content": prompt}],
+                model="claude-haiku-4-5-20251001",   # 6.25× cheaper than Opus; sufficient for JSON data retrieval
+                max_tokens=700,                       # actual output ≈ 440 tokens; headroom to spare
+                system=[{
+                    "type": "text",
+                    "text": _SYSTEM,
+                    "cache_control": {"type": "ephemeral"},  # Anthropic caches this block across calls
+                }],
+                messages=[{"role": "user", "content": user_msg}],
             )
             break                     # success — exit retry loop
         except anthropic.APIStatusError as exc:
@@ -435,7 +448,7 @@ Rules:
         # Compute actual cost from token usage reported by the API
         in_tok  = msg.usage.input_tokens
         out_tok = msg.usage.output_tokens
-        cost    = in_tok * 5 / 1_000_000 + out_tok * 25 / 1_000_000
+        cost    = in_tok * 0.80 / 1_000_000 + out_tok * 4.00 / 1_000_000  # Haiku 4.5 pricing
         result["_source"]        = "claude_api"
         result["_input_tokens"]  = in_tok
         result["_output_tokens"] = out_tok
@@ -445,7 +458,7 @@ Rules:
         logger.warning(
             f"Data Collect for {nse_symbol} - Claude API intel returned "
             f"{populated} populated fields | {in_tok} in + {out_tok} out tokens "
-            f"| cost ${cost:.4f} | SOURCE - Claude API / claude-opus-4-6"
+            f"| cost ${cost:.4f} | SOURCE - Claude API / claude-haiku-4-5"
         )
         return result
     except Exception as exc:
@@ -974,7 +987,7 @@ if res:
         _out = intel.get("_output_tokens", 0)
         _usd = intel.get("_cost_usd", 0.0)
         st.caption(
-            f"⚡ Estimated by Claude AI (claude-opus-4-6) · "
+            f"⚡ Estimated by Claude AI (claude-haiku-4-5) · "
             f"{_in:,} in + {_out:,} out tokens · "
             f"~${_usd:.4f} this call · cached 1 h · "
             f"verify before trading."
