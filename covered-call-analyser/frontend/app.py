@@ -85,6 +85,7 @@ for key, default in [
     ("symbol_loaded", ""),
     ("result",        None),
     ("last_qty_held", 0),
+    ("bypass_intel",  os.environ.get("CLAUDE_INTEL_BYPASS", "").lower() == "true"),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -254,14 +255,15 @@ def _fetch_option_quote(symbol: str, expiry_date: str, strike: float) -> dict:
 
 
 @st.cache_data(ttl=3600)
-def _fetch_intel_claude(symbol: str, nse_symbol: str, cmp: float) -> dict:
+def _fetch_intel_claude(symbol: str, nse_symbol: str, cmp: float, bypass_intel: bool = False) -> dict:
     """Fetch equity fundamentals, analyst targets, corporate events and technicals via Claude API.
 
     Replaces both _fetch_intel (yfinance Ticker.info) and _fetch_nse_actions (NSE API),
     both of which are rate-limited on Render.com shared IPs.
     Returns all-None dict on failure so callers need no error handling.
 
-    Bypass: set CLAUDE_INTEL_BYPASS=true to skip the API call and return mock data.
+    Bypass: pass bypass_intel=True (UI toggle) or set CLAUDE_INTEL_BYPASS=true (env var)
+    to skip the API call and return mock data.
     All returned dicts include _source ("claude_api" | "mock" | "blank"),
     _input_tokens, _output_tokens, _cost_usd for UI cost display.
     """
@@ -281,7 +283,7 @@ def _fetch_intel_claude(symbol: str, nse_symbol: str, cmp: float) -> dict:
     )
 
     # ── Bypass mode ───────────────────────────────────────────────────────────
-    if os.environ.get("CLAUDE_INTEL_BYPASS", "").lower() == "true":
+    if bypass_intel or os.environ.get("CLAUDE_INTEL_BYPASS", "").lower() == "true":
         today_dt = datetime.date.today()
         logger.warning(
             f"Data Collect for {nse_symbol} - CLAUDE_INTEL_BYPASS=true, returning mock data"
@@ -673,6 +675,16 @@ brokerage = 40.0
 stt_rate  = 0.001
 gst_rate  = 0.18
 
+st.session_state.bypass_intel = st.checkbox(
+    "Bypass Claude AI (use mock data)",
+    value=st.session_state.bypass_intel,
+    help=(
+        "Skip the Claude API call and show placeholder equity data. "
+        "Useful when ANTHROPIC_API_KEY is not set, or to avoid API costs during testing. "
+        "Mock values are price-consistent but NOT real market data."
+    ),
+)
+
 configure_charges = st.checkbox("Configure: Charges")
 if configure_charges:
     ch1, ch2, ch3 = st.columns(3)
@@ -730,7 +742,7 @@ if res:
     ticker    = _yf_ticker(res["symbol"], nse_map)
     nse_sym   = nse_map.get(res["symbol"].upper(), res["symbol"])
     ohlc      = _fetch_ohlc(ticker)                                        # keep — real prices for chart
-    intel     = _fetch_intel_claude(res["symbol"], nse_sym, res["cmp"])    # replaces _fetch_intel + _fetch_nse_actions
+    intel     = _fetch_intel_claude(res["symbol"], nse_sym, res["cmp"], st.session_state.bypass_intel)  # replaces _fetch_intel + _fetch_nse_actions
     tech      = _compute_technicals(ohlc, symbol=ticker, claude_estimates=intel)
     sector_hv = intel.get("sector_hv") or _compute_technicals(
         _fetch_sector_ohlc(intel.get("sector")),
