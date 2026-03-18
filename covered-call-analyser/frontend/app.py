@@ -849,6 +849,31 @@ if res:
     # ── Equity Data ───────────────────────────────────────────────────────────
     st.markdown('<div class="section-hd">Equity Data</div>', unsafe_allow_html=True)
 
+    _intel_source = intel.get("_source", "blank")
+    if _intel_source == "blank":
+        _api_key_set = bool(os.environ.get("ANTHROPIC_API_KEY"))
+        if not _api_key_set:
+            st.error(
+                "**Claude AI data unavailable** — `ANTHROPIC_API_KEY` is not configured. "
+                "Set it in the Render dashboard (Environment → Add Env Var) and redeploy, "
+                "or enable **Bypass Claude AI** above to use mock data.",
+                icon="🔑",
+            )
+        else:
+            st.warning(
+                "**Claude AI data unavailable** — the API returned an error after retries "
+                "(possibly overloaded or rate-limited). "
+                "Fields below show — as placeholders. "
+                "Re-run the analysis in a moment, or enable **Bypass Claude AI** to use mock data.",
+                icon="⚠️",
+            )
+    elif _intel_source == "mock":
+        st.info(
+            "**Bypass mode active** — showing mock data derived from CMP. "
+            "Values are illustrative only and are **not real market data**.",
+            icon="🔶",
+        )
+
     wk52_h = intel.get("fifty_two_week_high")
     wk52_l = intel.get("fifty_two_week_low")
 
@@ -862,7 +887,6 @@ if res:
          f"{sector_hv:.1f}%" if sector_hv else "—"),
     ]
     st.markdown(_kv_table_html(ed_rows), unsafe_allow_html=True)
-    _intel_source = intel.get("_source", "blank")
     if _intel_source == "claude_api":
         _in  = intel.get("_input_tokens", 0)
         _out = intel.get("_output_tokens", 0)
@@ -874,9 +898,7 @@ if res:
             f"verify before trading."
         )
     elif _intel_source == "mock":
-        st.caption("🔶 Mock data — bypass mode active (CLAUDE_INTEL_BYPASS=true). Not real data.")
-    else:
-        st.caption("⚠ Equity data unavailable — ANTHROPIC_API_KEY not set or API error.")
+        st.caption("🔶 Mock data (bypass mode) — not real market data.")
 
     # ── Options API Data ──────────────────────────────────────────────────────
     st.markdown('<div class="section-hd">Options API Data</div>', unsafe_allow_html=True)
@@ -1017,9 +1039,7 @@ if res:
             "verify corporate events before trading."
         )
     elif _intel_source == "mock":
-        st.caption("🔶 Mock data — bypass mode active (CLAUDE_INTEL_BYPASS=true). Not real data.")
-    else:
-        st.caption("⚠ Market intelligence unavailable — ANTHROPIC_API_KEY not set or API error.")
+        st.caption("🔶 Mock data (bypass mode) — not real market data.")
 
     # ── Strike Analysis ───────────────────────────────────────────────────────
     st.markdown('<div class="section-hd">Strike Analysis</div>', unsafe_allow_html=True)
