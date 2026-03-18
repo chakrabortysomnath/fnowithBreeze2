@@ -32,12 +32,13 @@ from .breeze_client import get_session, is_connected, refresh_session
 from .calculator import analyse_covered_call
 from .data_fetcher import (
     get_cmp, get_lot_size, get_available_expiries, get_option_chain,
+    get_option_quote,
     get_all_lot_sizes, get_all_nse_symbols, upsert_lot_size,
 )
 from .models import (
     HealthResponse, QuoteResponse,
     LotSizeResponse, LotSizeTableResponse, UpsertLotSizeRequest,
-    ExpiriesResponse, OptionChainResponse, OptionContract,
+    ExpiriesResponse, OptionChainResponse, OptionContract, OptionQuoteResponse,
     AnalyseRequest, AnalyseResponse, PositionDetails, StrikeAnalysis,
     ChargesBreakdown, PayoffPoint,
     RefreshSessionRequest, RefreshSessionResponse,
@@ -295,6 +296,68 @@ def option_chain(
 
     contracts = [OptionContract(**c) for c in contracts_raw]
     return OptionChainResponse(symbol=decoded, expiry_date=expiry, options=contracts)
+
+
+@app.get(
+    "/option-quote/{symbol}",
+    response_model=OptionQuoteResponse,
+    summary="Get detailed option quote for a specific strike",
+    description=(
+        "Fetches IV, OI, and Volume for a single call option strike by passing "
+        "the exact strike price to the Breeze API. Unlike /option-chain which "
+        "uses strike_price=0 (all strikes, may lack IV/OI/Volume), this endpoint "
+        "queries a specific strike to obtain full detail."
+    ),
+    tags=["Market Data"],
+)
+def option_quote(
+    symbol: str,
+    expiry: str = Query(..., description="Expiry date in YYYY-MM-DD format."),
+    strike: float = Query(..., description="Strike price in INR, e.g. 2900.0"),
+) -> OptionQuoteResponse:
+    """Return IV, OI, and Volume for a specific call option strike.
+
+    Args:
+        symbol: NSE F&O symbol (URL-encode & as %26).
+        expiry: Expiry date YYYY-MM-DD.
+        strike: Strike price as a number.
+
+    Raises:
+        400: Invalid expiry format.
+        404: No data for this symbol/expiry/strike.
+        503: Breeze session unavailable.
+    """
+    decoded = symbol.replace("%26", "&").upper()
+    logger.info(f"GET /option-quote/{decoded}?expiry={expiry}&strike={strike}")
+
+    try:
+        from datetime import datetime as _dt
+        _dt.strptime(expiry, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid expiry date format '{expiry}'. Use YYYY-MM-DD.",
+        )
+
+    try:
+        q = get_option_quote(decoded, expiry, strike)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        logger.exception(f"Unexpected error fetching option quote for {decoded}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {exc}")
+
+    return OptionQuoteResponse(
+        symbol=decoded,
+        expiry_date=expiry,
+        strike=q["strike_price"],
+        ltp=q["ltp"],
+        iv=q.get("iv"),
+        open_interest=q.get("open_interest"),
+        volume=q.get("volume"),
+    )
 
 
 # ---------------------------------------------------------------------------

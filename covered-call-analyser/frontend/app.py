@@ -93,11 +93,27 @@ def _encode(sym: str) -> str:
 @st.cache_data(ttl=300)
 def _fetch_nse_symbol_map() -> dict[str, str]:
     """Return F&O shortcode → NSE equity ticker from the backend config."""
+    source = f"backend {BACKEND_URL}/lot-sizes"
     try:
         r = requests.get(f"{BACKEND_URL}/lot-sizes", timeout=5)
         r.raise_for_status()
-        return r.json().get("nse_symbols", {})
-    except Exception:
+        result = r.json().get("nse_symbols", {})
+        if not result:
+            logger.warning(
+                f"Data Collect for NSE symbol map blank, "
+                f"SEARCHED WITH - GET /lot-sizes, SOURCE - {source}"
+            )
+        else:
+            logger.warning(
+                f"Data Collect for NSE symbol map OK — "
+                f"{len(result)} entries loaded, SOURCE - {source}"
+            )
+        return result
+    except Exception as exc:
+        logger.warning(
+            f"Data Collect for NSE symbol map failed, "
+            f"SEARCHED WITH - GET /lot-sizes, SOURCE - {source} | error: {exc}"
+        )
         return {}
 
 
@@ -105,9 +121,20 @@ def _yf_ticker(symbol: str, nse_map: dict[str, str]) -> str:
     """Resolve an F&O shortcode to a yfinance-compatible ticker."""
     sym = symbol.upper()
     if sym in _INDEX_YF_TICKERS:
-        return _INDEX_YF_TICKERS[sym]
-    nse = nse_map.get(sym)
-    return f"{nse}.NS" if nse else f"{sym}.NS"
+        ticker = _INDEX_YF_TICKERS[sym]
+        logger.warning(
+            f"Data Collect ticker resolution: {sym} → {ticker} (index), "
+            f"SEARCHED WITH - _INDEX_YF_TICKERS, SOURCE - hardcoded index map"
+        )
+        return ticker
+    nse    = nse_map.get(sym)
+    ticker = f"{nse}.NS" if nse else f"{sym}.NS"
+    logger.warning(
+        f"Data Collect ticker resolution: {sym} → yf_ticker={ticker} "
+        f"(nse_map entry: {nse!r}), "
+        f"SEARCHED WITH - nse_map[{sym}], SOURCE - backend /lot-sizes nse_symbols"
+    )
+    return ticker
 
 
 @st.cache_data(ttl=300)
@@ -155,6 +182,44 @@ def _fetch_ohlc(ticker: str) -> pd.DataFrame | None:
             f"SEARCHED WITH - {criteria}, SOURCE - {source} | error: {exc}"
         )
         return None
+
+
+@st.cache_data(ttl=60)
+def _fetch_option_quote(symbol: str, expiry_date: str, strike: float) -> dict:
+    """Fetch IV, OI, Volume for a specific strike from the backend /option-quote endpoint.
+
+    Uses strike_price=<specific> rather than 0, so Breeze returns full detail.
+    """
+    criteria = f"symbol={symbol} expiry={expiry_date} strike={strike}"
+    source   = f"backend /option-quote/{symbol}"
+    blank    = {"iv": None, "open_interest": None, "volume": None, "ltp": None}
+    try:
+        r = requests.get(
+            f"{BACKEND_URL}/option-quote/{_encode(symbol)}",
+            params={"expiry": expiry_date, "strike": strike},
+            timeout=15,
+        )
+        r.raise_for_status()
+        data   = r.json()
+        result = {
+            "ltp":           data.get("ltp"),
+            "iv":            data.get("iv"),
+            "open_interest": data.get("open_interest"),
+            "volume":        data.get("volume"),
+        }
+        for field, label in [("iv", "IV"), ("open_interest", "OI"), ("volume", "Volume")]:
+            if result.get(field) is None:
+                logger.warning(
+                    f"Data Collect for {symbol} [{label}] blank, "
+                    f"SEARCHED WITH - {criteria}, SOURCE - {source}"
+                )
+        return result
+    except Exception as exc:
+        logger.warning(
+            f"Data Collect for {symbol} [option quote] failed, "
+            f"SEARCHED WITH - {criteria}, SOURCE - {source} | error: {exc}"
+        )
+        return blank
 
 
 def _fmt_inr(v) -> str:
@@ -209,7 +274,25 @@ def _fetch_intel(ticker: str) -> dict:
         analyst_recommendation=None, analyst_count=None,
     )
     try:
-        info = yf.Ticker(ticker).info
+        logger.warning(
+            f"Data Collect for {ticker} - starting yfinance fetch, "
+            f"SEARCHED WITH - {criteria}, SOURCE - {source}"
+        )
+        t_obj = yf.Ticker(ticker)
+        info  = t_obj.info
+        logger.warning(
+            f"Data Collect for {ticker} - yfinance info returned {len(info)} fields, "
+            f"SEARCHED WITH - {criteria}, SOURCE - {source} | "
+            f"quoteType={info.get('quoteType')!r} "
+            f"exchange={info.get('exchange')!r} "
+            f"currency={info.get('currency')!r} | "
+            f"key_fields: "
+            f"fiftyTwoWeekHigh={info.get('fiftyTwoWeekHigh')!r} "
+            f"fiftyTwoWeekLow={info.get('fiftyTwoWeekLow')!r} "
+            f"beta={info.get('beta')!r} "
+            f"sector={info.get('sector')!r} "
+            f"regularMarketPrice={info.get('regularMarketPrice')!r}"
+        )
         result = {
             "fifty_two_week_high":   info.get("fiftyTwoWeekHigh"),
             "fifty_two_week_low":    info.get("fiftyTwoWeekLow"),
@@ -229,8 +312,7 @@ def _fetch_intel(ticker: str) -> dict:
             result["ex_dividend_date"] = datetime.datetime.fromtimestamp(
                 int(ex_ts)).strftime("%d %b %Y")
         try:
-            t   = yf.Ticker(ticker)
-            cal = t.calendar
+            cal = t_obj.calendar
             if cal and "Earnings Date" in cal:
                 dates = cal["Earnings Date"]
                 d = dates[0] if isinstance(dates, list) else dates
@@ -722,8 +804,53 @@ if res:
     # ── Options API Data ──────────────────────────────────────────────────────
     st.markdown('<div class="section-hd">Options API Data</div>', unsafe_allow_html=True)
 
-    # Per-strike table: IV, OI, Volume, Moneyness, Charges
-    st.markdown(_options_api_table_html(res["strikes"], res["cmp"]), unsafe_allow_html=True)
+    # Strike selector — default to ATM
+    strike_labels = [
+        f"{s['strike_type']}  —  ₹{s['strike']:,.0f}"
+        for s in res["strikes"]
+    ]
+    atm_default = next(
+        (i for i, s in enumerate(res["strikes"]) if s["strike_type"] == "ATM"), 0
+    )
+    selected_label = st.selectbox(
+        "Select strike to view options data",
+        options=strike_labels,
+        index=atm_default,
+        key="opt_api_strike_sel",
+        label_visibility="collapsed",
+    )
+    sel_idx = strike_labels.index(selected_label)
+    sel_s   = res["strikes"][sel_idx]
+
+    # Fetch live option data for the selected strike using specific strike_price
+    # (strike_price=0 on the full chain doesn't return IV/OI/Volume from Breeze)
+    opt_q = _fetch_option_quote(res["symbol"], res["expiry_date"], sel_s["strike"])
+
+    gross       = sel_s.get("gross_premium_total") or 0
+    moneyness   = (sel_s["strike"] - res["cmp"]) / res["cmp"] * 100
+    charges_pct = (sel_s["charges"]["total"] / gross * 100) if gross > 0 else 0
+
+    opt_rows = [
+        ("IV %",
+         "Implied Volatility — the market's expectation of future price movement for this strike",
+         f"{opt_q['iv']:.1f}%" if opt_q.get("iv") is not None else "—"),
+        ("Open Interest",
+         "Total outstanding contracts at this strike — proxy for liquidity",
+         f"{opt_q['open_interest']:,}" if opt_q.get("open_interest") is not None else "—"),
+        ("Volume",
+         "Number of contracts traded today at this strike",
+         f"{opt_q['volume']:,}" if opt_q.get("volume") is not None else "—"),
+        ("LTP (premium)",
+         "Last traded price of this call option (cross-check against analyse result)",
+         _fmt_inr(opt_q.get("ltp"))),
+        ("Moneyness %",
+         "Strike distance from CMP — negative means ITM, positive means OTM",
+         f"{moneyness:+.1f}%"),
+        ("Charges %",
+         "Total transaction costs as a percentage of gross premium",
+         f"{charges_pct:.1f}%"),
+    ]
+    st.markdown(_kv_table_html(opt_rows), unsafe_allow_html=True)
 
     # Equity-level reference metrics that contextualise the option data
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
@@ -736,11 +863,14 @@ if res:
         wk52_pos  = "—"
 
     ref_rows = [
-        ("52-Week Position", "CMP within the 52-week high–low band (0% = 52w low, 100% = 52w high)",
+        ("52-Week Position",
+         "CMP within the 52-week high–low band (0% = 52w low, 100% = 52w high)",
          wk52_pos),
-        ("HV 20-Day",        "Annualised 20-day historical volatility of the equity",
+        ("HV 20-Day",
+         "Annualised 20-day historical volatility of the equity",
          f"{tech['hv_20_pct']:.1f}%" if tech.get("hv_20_pct") else "—"),
-        ("ATR 14-Day",       "Average True Range over the last 14 sessions — daily price noise in ₹",
+        ("ATR 14-Day",
+         "Average True Range over the last 14 sessions — daily price noise in ₹",
          _fmt_inr(tech.get("atr_14"))),
     ]
     st.markdown(_kv_table_html(ref_rows), unsafe_allow_html=True)

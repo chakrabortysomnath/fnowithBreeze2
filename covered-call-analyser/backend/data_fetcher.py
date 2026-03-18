@@ -460,3 +460,93 @@ def get_option_chain(symbol: str, expiry_date: str) -> list[dict]:
     contracts.sort(key=lambda c: c["strike_price"])
     logger.info(f"Option chain for {symbol} {expiry_date}: {len(contracts)} strikes")
     return contracts
+
+
+def get_option_quote(symbol: str, expiry_date: str, strike: float) -> dict:
+    """Fetch a detailed option quote for a *specific* strike from the Breeze API.
+
+    Unlike get_option_chain (which uses strike_price="0" for all strikes and
+    may not include IV/OI/Volume), this passes the exact strike so Breeze
+    returns the full per-strike detail including implied volatility, open
+    interest, and volume.
+
+    Args:
+        symbol:      NSE F&O symbol, e.g. "RELIANCE".
+        expiry_date: Expiry date in YYYY-MM-DD format.
+        strike:      Strike price as a float, e.g. 2900.0.
+
+    Returns:
+        Dict with keys: strike_price (float), ltp (float), iv, open_interest,
+        volume (all Optional).
+
+    Raises:
+        ValueError:   No data returned for this symbol/expiry/strike.
+        RuntimeError: Breeze API call failed.
+    """
+    breeze = get_session()
+    breeze_expiry = _to_breeze_iso(expiry_date)
+    # Breeze expects the strike as an integer string (no decimals)
+    strike_str = str(int(strike))
+
+    logger.info(
+        f"Fetching option quote for {symbol} expiry={expiry_date} strike={strike_str}"
+    )
+
+    try:
+        response = breeze.get_option_chain_quotes(
+            stock_code=symbol,
+            exchange_code="NFO",
+            product_type="options",
+            expiry_date=breeze_expiry,
+            right="call",
+            strike_price=strike_str,
+        )
+    except Exception as exc:
+        logger.error(
+            f"Breeze get_option_chain_quotes failed for {symbol} strike={strike_str}: {exc}"
+        )
+        raise RuntimeError(
+            f"Failed to fetch option quote for '{symbol}' expiry {expiry_date} "
+            f"strike {strike}: {exc}"
+        ) from exc
+
+    status = response.get("Status")
+    error  = response.get("Error")
+    data   = response.get("Success")
+
+    if status != 200:
+        raise ValueError(
+            f"Breeze API error for option quote '{symbol}' expiry {expiry_date} "
+            f"strike {strike} (status={status}): {error or 'Unknown error'}"
+        )
+
+    if not data:
+        raise ValueError(
+            f"No option quote data returned for '{symbol}' expiry {expiry_date} "
+            f"strike {strike}. Check symbol, expiry, and strike price."
+        )
+
+    raw     = data[0]
+    ltp_raw = raw.get("ltp") or raw.get("last_traded_price")
+    iv_raw  = raw.get("implied_volatility") or raw.get("iv")
+    oi_raw  = raw.get("open_interest") or raw.get("openInterest")
+    vol_raw = raw.get("volume") or raw.get("total_quantity_traded")
+
+    try:
+        ltp = float(ltp_raw) if ltp_raw is not None else 0.0
+    except (TypeError, ValueError):
+        ltp = 0.0
+
+    result = {
+        "strike_price":  strike,
+        "ltp":           ltp,
+        "iv":            float(iv_raw) if iv_raw  is not None else None,
+        "open_interest": int(oi_raw)   if oi_raw  is not None else None,
+        "volume":        int(vol_raw)  if vol_raw is not None else None,
+    }
+    logger.info(
+        f"Option quote {symbol} {expiry_date} ₹{strike}: "
+        f"ltp={ltp}, IV={result['iv']}, OI={result['open_interest']}, "
+        f"Vol={result['volume']}"
+    )
+    return result

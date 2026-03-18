@@ -93,6 +93,24 @@ class OptionChainResponse(BaseModel):
     options: list[OptionContract]
 
 
+class OptionQuoteResponse(BaseModel):
+    """Response model for GET /option-quote/{symbol} — single strike detail."""
+
+    symbol: str
+    expiry_date: str
+    strike: float = Field(description="Strike price queried (INR).")
+    ltp: float = Field(description="Last traded premium (INR).")
+    iv: Optional[float] = Field(
+        default=None, description="Implied volatility (%). None if not returned by Breeze."
+    )
+    open_interest: Optional[int] = Field(
+        default=None, description="Open interest in contracts. None if not returned."
+    )
+    volume: Optional[int] = Field(
+        default=None, description="Volume traded today. None if not returned."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Phase 3 — Covered call analysis
 # ---------------------------------------------------------------------------
