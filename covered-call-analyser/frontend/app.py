@@ -1281,50 +1281,115 @@ if res:
         ))
     st.markdown(_kv_table_html(build_rows), unsafe_allow_html=True)
 
-    # ── Per-strike: capital metrics + R/R commentary (one block per strike) ───
-    strike_rows: list[tuple[str, str, str]] = []
+    # ── Per-strike subsections: header + note + kv rows ───────────────────────
+    _STRIKE_META = {
+        "ITM": {
+            "title":  "ITM — In The Money",
+            "note":   (
+                "The strike is below the current market price. "
+                "You collect a larger premium and get the most downside protection, "
+                "but your upside is capped immediately. "
+                "Best suited when you expect the stock to stay flat or drift slightly lower."
+            ),
+            "bg":     "rgba(106, 143, 191, 0.10)",
+            "border": "#6A8FBF",
+        },
+        "ATM": {
+            "title":  "ATM — At The Money",
+            "note":   (
+                "The strike is at or nearest to the current market price. "
+                "Offers a balanced mix of premium income and upside participation. "
+                "Maximum profit is realised if the stock closes at or just above the strike at expiry."
+            ),
+            "bg":     "rgba(88, 166, 255, 0.10)",
+            "border": "#58A6FF",
+        },
+        "OTM+1": {
+            "title":  "OTM+1 — Out of The Money (1 step)",
+            "note":   (
+                "The strike is one increment above the current market price. "
+                "Lower premium than ATM but lets you participate in modest upside. "
+                "The call is profitable if the stock rises to the strike by expiry."
+            ),
+            "bg":     "rgba(32, 164, 160, 0.10)",
+            "border": "#20A4A0",
+        },
+        "OTM+2": {
+            "title":  "OTM+2 — Out of The Money (2 steps)",
+            "note":   (
+                "The strike is two increments above the current market price. "
+                "Lowest premium and least downside cushion, but highest upside participation. "
+                "Best when you are mildly bullish and want maximum potential gain from the covered call."
+            ),
+            "bg":     "rgba(57, 208, 200, 0.10)",
+            "border": "#39D0C8",
+        },
+    }
+
     for s in res["strikes"]:
         stype     = s["strike_type"]
+        meta      = _STRIKE_META.get(stype, {"title": stype, "note": "", "bg": "rgba(255,255,255,0.04)", "border": "#444"})
         _net_prem = s.get("net_premium_total") or 0
         _net_cap  = _gross_capital - _net_prem
         _loss_pct = (_net_cap / _gross_capital * 100) if _gross_capital else 0
         _loss_sup = ((_cmp - _sup) * _lot - _net_prem) if _sup and _sup < _cmp else None
         _note     = _rr_intel.get(stype)
 
-        strike_rows.append((
-            f"{stype} — Net premium",
-            "Net option premium received after all transaction charges",
-            _fmt_inr(_net_prem),
-        ))
-        strike_rows.append((
-            f"{stype} — Net capital at risk",
-            "Gross equity capital minus net premium; the effective amount at risk in the position",
-            f"₹{_net_cap:,.0f}  ({_loss_pct:.1f}% of gross)",
-        ))
-        strike_rows.append((
-            f"{stype} — Loss to support",
-            (
-                f"Estimated P&L loss if stock falls to key support ₹{_sup:,.0f} — "
-                "equity loss offset by premium collected"
-            ) if _sup else "Key support level not available",
-            _fmt_inr(_loss_sup) if _loss_sup is not None else "—",
-        ))
-        strike_rows.append((
-            f"{stype} — Max profit",
-            "Maximum achievable profit if stock closes at or above the strike price at expiry",
-            _fmt_inr(s.get("max_profit_total")),
-        ))
+        kv_rows = [
+            ("Net premium",
+             "Net option premium received after all transaction charges",
+             _fmt_inr(_net_prem)),
+            ("Net capital at risk",
+             "Gross equity capital minus net premium; the effective amount at risk in the position",
+             f"₹{_net_cap:,.0f}  ({_loss_pct:.1f}% of gross)"),
+            ("Loss to support",
+             (
+                 f"Estimated P&L loss if stock falls to key support ₹{_sup:,.0f} — "
+                 "equity loss offset by premium collected"
+             ) if _sup else "Key support level not available",
+             _fmt_inr(_loss_sup) if _loss_sup is not None else "—"),
+            ("Max profit",
+             "Maximum achievable profit if stock closes at or above the strike price at expiry",
+             _fmt_inr(s.get("max_profit_total"))),
+        ]
         if _note:
-            strike_rows.append((
-                f"{stype} — R/R commentary",
+            kv_rows.append((
+                "R/R commentary",
                 "Claude AI risk/reward note for this strike — verify before trading",
                 _note,
             ))
-        # visual spacer between strike groups
-        strike_rows.append(("", "", ""))
 
-    if strike_rows:
-        st.markdown(_kv_table_html(strike_rows), unsafe_allow_html=True)
+        # Build card HTML: coloured header + note + kv table
+        cell = "padding:6px 12px;border-bottom:1px solid #30363D;vertical-align:middle;"
+        rows_html = []
+        for name, desc, value in kv_rows:
+            _tip  = f' title="{desc}"' if desc else ""
+            _icon = (' <span style="color:#8B949E;font-size:11px;cursor:help;">ⓘ</span>'
+                     if desc else "")
+            rows_html.append(
+                f'<tr>'
+                f'<td style="{cell} width:52%;"{_tip}>'
+                f'<span style="color:#E6EDF3;font-size:13px;font-weight:500;">{name}{_icon}</span>'
+                f'</td>'
+                f'<td style="{cell} width:48%;text-align:right;color:#C9D1D9;font-size:13px;'
+                f'font-family:\'Courier New\',monospace;">{value}</td>'
+                f'</tr>'
+            )
+
+        card_html = (
+            f'<div style="background:{meta["bg"]};border-left:3px solid {meta["border"]};'
+            f'border-radius:6px;margin-bottom:12px;overflow:hidden;">'
+            f'<div style="padding:10px 14px 6px 14px;">'
+            f'<span style="color:{meta["border"]};font-size:14px;font-weight:700;">{meta["title"]}</span>'
+            f'<br><span style="color:#8B949E;font-size:12px;line-height:1.5;">{meta["note"]}</span>'
+            f'</div>'
+            f'<table style="width:100%;border-collapse:collapse;'
+            f'font-family:Inter,\'Segoe UI\',sans-serif;">'
+            f'{"".join(rows_html)}'
+            f'</table>'
+            f'</div>'
+        )
+        st.markdown(card_html, unsafe_allow_html=True)
 
     if _intel_source == "claude_api":
         st.caption(
