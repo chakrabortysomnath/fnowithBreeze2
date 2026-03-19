@@ -83,11 +83,17 @@ services:
       - key: BACKEND_URL
         value: https://covered-call-backend.onrender.com
 
-      # Health-check URL polled on every page load to show Breeze connection status.
+      # Health-check URL polled periodically to show Breeze connection status.
       # Defaults to BACKEND_URL/health when unset.
       # Set to empty string "" to disable the connection banner entirely.
       - key: PING_URL
         value: https://covered-call-backend.onrender.com/health
+
+      # How often (in seconds) the frontend re-polls the backend /health endpoint.
+      # Increase for quieter logs; decrease for faster disconnect detection.
+      # Minimum enforced: 5 s.  Default: 30 s.
+      - key: HEALTH_CHECK_TTL
+        value: "30"
 
       # Anthropic API key — used by _fetch_intel_claude() to fetch equity intel and
       # market intelligence via Claude API (replaces yfinance + NSE which are

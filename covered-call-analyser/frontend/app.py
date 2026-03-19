@@ -24,9 +24,18 @@ logger = logging.getLogger(__name__)
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000").rstrip("/")
 
-# PING_URL — health-check URL polled on every page load to show connection status.
+# PING_URL — health-check URL polled periodically to show connection status.
 # Defaults to BACKEND_URL/health.  Set to empty string "" to disable the ping banner.
 PING_URL = os.environ.get("PING_URL", f"{BACKEND_URL}/health").strip()
+
+# HEALTH_CHECK_TTL — seconds between health-check HTTP calls (Streamlit cache TTL).
+# Increase to reduce network noise; decrease for faster Breeze-disconnect detection.
+# Default: 30 s.  Set via HEALTH_CHECK_TTL env var in the Render dashboard.
+_hc_ttl_raw = os.environ.get("HEALTH_CHECK_TTL", "30")
+try:
+    HEALTH_CHECK_TTL = max(5, int(_hc_ttl_raw))   # floor at 5 s to prevent hammering
+except ValueError:
+    HEALTH_CHECK_TTL = 30
 
 STRIKE_COLORS = {
     "ITM":   "#6A8FBF",
@@ -68,9 +77,18 @@ st.markdown("""
 
 # ── Backend health ────────────────────────────────────────────────────────────
 
+@st.cache_data(ttl=HEALTH_CHECK_TTL)
+def _ping_backend(url: str) -> dict:
+    """Hit the /health endpoint and return the JSON response.
+
+    Cached for HEALTH_CHECK_TTL seconds so repeated Streamlit reruns
+    (widget interactions, etc.) do not hammer the backend.
+    """
+    return requests.get(url, timeout=5).json()
+
 if PING_URL:
     try:
-        h = requests.get(PING_URL, timeout=5).json()
+        h = _ping_backend(PING_URL)
         if h.get("breeze_connected"):
             st.success("● Breeze connected")
         else:
