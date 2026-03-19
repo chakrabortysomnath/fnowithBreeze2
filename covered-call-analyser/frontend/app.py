@@ -15,6 +15,14 @@ import streamlit as st
 
 from nav import NAV_CSS, nav_bar
 
+# ── Static equity metadata (sector / industry lookup) ─────────────────────────
+import json as _json
+import pathlib as _pathlib
+_EQUITY_META_PATH = _pathlib.Path(__file__).parent / "equity_meta.json"
+_EQUITY_META: dict = (
+    _json.loads(_EQUITY_META_PATH.read_text()) if _EQUITY_META_PATH.exists() else {}
+)
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 
 import logging
@@ -183,20 +191,22 @@ def _fetch_analyse(payload: dict) -> dict:
     return r.json()
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86_400)
 def _fetch_ohlc(ticker: str) -> pd.DataFrame | None:
-    """Fetch 30-day daily OHLC from yfinance. ticker is a resolved yfinance symbol.
+    """Fetch 1-year daily OHLC from yfinance. ticker is a resolved yfinance symbol.
 
-    Retries up to 3 times with exponential back-off on rate-limit errors.
-    TTL set to 3600s to reduce Render shared-IP throttling.
+    1-year data is used to compute 52-week H/L, beta, HV-20, ATR-14, support/resistance,
+    and momentum — all derived in Python without a Claude API call.
+    The candlestick chart slices the last 22 rows (~1 month) at render time.
+    TTL set to 86 400s (24 h) — 52-week stats don't change intraday.
     """
     import time
     import yfinance as yf
-    criteria = f"ticker={ticker} period=1mo interval=1d"
+    criteria = f"ticker={ticker} period=1y interval=1d"
     source   = "yfinance/download"
     for attempt in range(3):
         try:
-            df = yf.download(ticker, period="1mo", interval="1d",
+            df = yf.download(ticker, period="1y", interval="1d",
                              progress=False, auto_adjust=True)
             if not df.empty:
                 df.index = pd.to_datetime(df.index)
@@ -205,13 +215,13 @@ def _fetch_ohlc(ticker: str) -> pd.DataFrame | None:
             if attempt < 2:
                 wait = 2 ** (attempt + 1)
                 logger.warning(
-                    f"Data Collect for {ticker} rate-limit/empty (attempt {attempt+1}), "
+                    f"Data Collect for {ticker} 1y rate-limit/empty (attempt {attempt+1}), "
                     f"retrying in {wait}s | SEARCHED WITH - {criteria}, SOURCE - {source}"
                 )
                 time.sleep(wait)
                 continue
             logger.warning(
-                f"Data Collect for {ticker} failed (empty after {attempt+1} attempts), "
+                f"Data Collect for {ticker} 1y failed (empty after {attempt+1} attempts), "
                 f"SEARCHED WITH - {criteria}, SOURCE - {source}"
             )
             return None
@@ -272,33 +282,35 @@ def _fetch_option_quote(symbol: str, expiry_date: str, strike: float) -> dict:
         return blank
 
 
-@st.cache_data(ttl=86_400)   # 24 h — fundamental equity data changes at most once per day
+@st.cache_data(ttl=86_400)   # 24 h — analyst targets and corporate dates change at most daily
 def _fetch_intel_claude(symbol: str, nse_symbol: str, cmp: float, bypass_intel: bool = False) -> dict:
-    """Fetch equity fundamentals, analyst targets, corporate events and technicals via Claude API.
+    """Fetch analyst targets and corporate calendar dates via Claude API.
 
-    Replaces both _fetch_intel (yfinance Ticker.info) and _fetch_nse_actions (NSE API),
-    both of which are rate-limited on Render.com shared IPs.
+    Scope deliberately limited to data that cannot be computed from OHLC:
+      sector, industry (for stocks absent from equity_meta.json),
+      analyst_target_low/mean/high, analyst_recommendation, analyst_count,
+      earnings_date, ex_dividend_date, board_meeting_date, agm_date.
+
+    Fields now derived purely in Python (NOT fetched here):
+      fifty_two_week_high/low, beta, atr_14, hv_20_pct, sector_hv,
+      key_support, key_resistance, momentum_outlook, rr_itm/atm/otm1/otm2.
+
+    sector/industry are pre-populated from _EQUITY_META (equity_meta.json) when available,
+    reducing the Claude schema further for the top-50 F&O stocks.
+
     Returns all-None dict on failure so callers need no error handling.
-
-    Bypass: pass bypass_intel=True (UI toggle) or set CLAUDE_INTEL_BYPASS=true (env var)
-    to skip the API call and return mock data.
-    All returned dicts include _source ("claude_api" | "mock" | "blank"),
-    _input_tokens, _output_tokens, _cost_usd for UI cost display.
+    Includes _source ("claude_api" | "mock" | "blank") and token/cost metadata.
     """
     import json
     import anthropic
 
+    # Slim blank — only fields Claude is still responsible for
     blank = dict(
-        fifty_two_week_high=None, fifty_two_week_low=None,
-        beta=None, sector=None, industry=None,
-        analyst_target_low=None, analyst_target_mean=None,
-        analyst_target_high=None,
+        sector=None, industry=None,
+        analyst_target_low=None, analyst_target_mean=None, analyst_target_high=None,
         analyst_recommendation=None, analyst_count=None,
         earnings_date=None, ex_dividend_date=None,
         agm_date=None, board_meeting_date=None,
-        atr_14=None, hv_20_pct=None, sector_hv=None,
-        key_support=None, key_resistance=None, momentum_outlook=None,
-        rr_itm=None, rr_atm=None, rr_otm1=None, rr_otm2=None,
         _source="blank", _input_tokens=0, _output_tokens=0, _cost_usd=0.0,
     )
 
@@ -308,12 +320,11 @@ def _fetch_intel_claude(symbol: str, nse_symbol: str, cmp: float, bypass_intel: 
         logger.warning(
             f"Data Collect for {nse_symbol} - CLAUDE_INTEL_BYPASS=true, returning mock data"
         )
+        # Sector/industry from static lookup when available, else mock values
+        _meta = _EQUITY_META.get(symbol.upper(), {})
         return dict(
-            fifty_two_week_high=round(cmp * 1.22, 2),
-            fifty_two_week_low=round(cmp * 0.74, 2),
-            beta=0.85,
-            sector="Consumer Staples",
-            industry="Household Products",
+            sector=_meta.get("sector", "Consumer Staples"),
+            industry=_meta.get("industry", "Household Products"),
             analyst_target_low=round(cmp * 0.92, 2),
             analyst_target_mean=round(cmp * 1.08, 2),
             analyst_target_high=round(cmp * 1.25, 2),
@@ -323,28 +334,6 @@ def _fetch_intel_claude(symbol: str, nse_symbol: str, cmp: float, bypass_intel: 
             ex_dividend_date=(today_dt + datetime.timedelta(days=90)).strftime("%d %b %Y"),
             board_meeting_date=(today_dt + datetime.timedelta(days=42)).strftime("%d %b %Y"),
             agm_date=(today_dt + datetime.timedelta(days=120)).strftime("%d %b %Y"),
-            atr_14=round(cmp * 0.018, 2),
-            hv_20_pct=22.0,
-            sector_hv=18.5,
-            key_support=round(cmp * 0.94, 2),
-            key_resistance=round(cmp * 1.07, 2),
-            momentum_outlook="neutral",
-            rr_itm=(
-                f"ITM call offers ~6% downside buffer; max profit capped at premium "
-                f"if stock stays above ₹{round(cmp * 0.96):,.0f}."
-            ),
-            rr_atm=(
-                f"ATM call balances yield and protection; profitable at expiry "
-                f"if stock holds near ₹{round(cmp):,.0f}."
-            ),
-            rr_otm1=(
-                f"OTM+1 targets ~3% upside to ₹{round(cmp * 1.03):,.0f}; "
-                f"higher yield but less downside cushion."
-            ),
-            rr_otm2=(
-                f"OTM+2 targets ~6% upside to ₹{round(cmp * 1.06):,.0f}; "
-                f"highest yield potential, minimal protection."
-            ),
             _source="mock", _input_tokens=0, _output_tokens=0, _cost_usd=0.0,
         )
 
@@ -356,20 +345,24 @@ def _fetch_intel_claude(symbol: str, nse_symbol: str, cmp: float, bypass_intel: 
         )
         return blank
 
-    # Static schema block — extracted so Anthropic can cache it across calls for different stocks.
-    # Only the short user message (stock name, CMP, date) changes per call.
-    _SYSTEM = (
-        "You are a financial data assistant for Indian NSE equities.\n"
-        "Return ONLY a valid JSON object with these exact keys "
-        "(use null for unknown/uncertain values):\n"
-        "{\n"
-        '  "fifty_two_week_high": <number — 52-week high closing price in ₹>,\n'
-        '  "fifty_two_week_low": <number — 52-week low closing price in ₹>,\n'
-        '  "beta": <number — beta relative to Nifty 50, typically 0.5–2.0>,\n'
-        '  "sector": <string — one of: "Consumer Staples", "Consumer Discretionary", '
-        '"Technology", "Financial Services", "Healthcare", "Energy", "Basic Materials", '
-        '"Industrials", "Real Estate", "Communication Services", or null>,\n'
-        '  "industry": <string — specific industry sub-classification>,\n'
+    # ── Static sector/industry from equity_meta.json ──────────────────────────
+    _meta            = _EQUITY_META.get(symbol.upper(), {})
+    _static_sector   = _meta.get("sector")
+    _static_industry = _meta.get("industry")
+    _has_static_meta = bool(_static_sector and _static_industry)
+
+    # ── Build schema — conditionally include sector/industry ──────────────────
+    # Anthropic caches the system block; cache_control is on the full string, so we
+    # build the prompt string first, then pass it with cache_control in the API call.
+    _schema_fields = "{\n"
+    if not _has_static_meta:
+        _schema_fields += (
+            '  "sector": <string — one of: "Consumer Staples", "Consumer Discretionary", '
+            '"Technology", "Financial Services", "Healthcare", "Energy", "Basic Materials", '
+            '"Industrials", "Real Estate", "Communication Services", or null>,\n'
+            '  "industry": <string — specific industry sub-classification>,\n'
+        )
+    _schema_fields += (
         '  "analyst_target_low": <number — lowest analyst 12-month price target in ₹>,\n'
         '  "analyst_target_mean": <number — consensus analyst 12-month price target in ₹>,\n'
         '  "analyst_target_high": <number — highest analyst 12-month price target in ₹>,\n'
@@ -378,22 +371,17 @@ def _fetch_intel_claude(symbol: str, nse_symbol: str, cmp: float, bypass_intel: 
         '  "earnings_date": <string "DD Mon YYYY" — next quarterly/annual results date, or null>,\n'
         '  "ex_dividend_date": <string "DD Mon YYYY" — next ex-dividend date, or null>,\n'
         '  "board_meeting_date": <string "DD Mon YYYY" — next board meeting date, or null>,\n'
-        '  "agm_date": <string "DD Mon YYYY" — next AGM date, or null>,\n'
-        '  "atr_14": <number — estimated 14-day Average True Range in ₹>,\n'
-        '  "hv_20_pct": <number — estimated annualised 20-day historical volatility %>,\n'
-        '  "sector_hv": <number — estimated annualised 20-day HV % for matching Nifty sector index>,\n'
-        '  "key_support": <number — nearest technical support level in ₹ below CMP>,\n'
-        '  "key_resistance": <number — nearest technical resistance level in ₹ above CMP>,\n'
-        '  "momentum_outlook": <string — one of: "bullish", "neutral", "bearish">,\n'
-        '  "rr_itm": <string — 1-sentence risk/reward note for ITM covered call>,\n'
-        '  "rr_atm": <string — 1-sentence risk/reward note for ATM covered call>,\n'
-        '  "rr_otm1": <string — 1-sentence risk/reward note for OTM+1 covered call>,\n'
-        '  "rr_otm2": <string — 1-sentence risk/reward note for OTM+2 covered call>\n'
+        '  "agm_date": <string "DD Mon YYYY" — next AGM date, or null>\n'
         "}\n"
-        "Rules:\n"
-        "- All date strings must be after TODAY (supplied in the user message). Use null for past/unknown dates.\n"
-        "- key_support must be below CMP; key_resistance must be above CMP.\n"
-        "- rr_* notes must reference specific ₹ levels or % figures where possible.\n"
+    )
+    _SYSTEM = (
+        "You are a financial data assistant for Indian NSE equities.\n"
+        "Return ONLY a valid JSON object with these exact keys "
+        "(use null for unknown/uncertain values):\n"
+        + _schema_fields
+        + "Rules:\n"
+        "- All date strings must be after TODAY (supplied in the user message). "
+        "Use null for past/unknown dates.\n"
         "- Return ONLY the JSON object, no explanation or markdown."
     )
 
@@ -413,8 +401,8 @@ def _fetch_intel_claude(symbol: str, nse_symbol: str, cmp: float, bypass_intel: 
             time.sleep(2 ** attempt)
         try:
             msg = client.messages.create(
-                model="claude-haiku-4-5-20251001",   # 6.25× cheaper than Opus; sufficient for JSON data retrieval
-                max_tokens=700,                       # actual output ≈ 440 tokens; headroom to spare
+                model="claude-haiku-4-5-20251001",
+                max_tokens=400,                       # schema now ≤11 fields; output ≈120–160 tokens
                 system=[{
                     "type": "text",
                     "text": _SYSTEM,
@@ -463,6 +451,12 @@ def _fetch_intel_claude(symbol: str, nse_symbol: str, cmp: float, bypass_intel: 
             if val is not None:
                 result[key] = val
 
+        # Overlay static sector/industry — always wins over Claude estimate
+        if _static_sector:
+            result["sector"] = _static_sector
+        if _static_industry:
+            result["industry"] = _static_industry
+
         # Compute actual cost from token usage reported by the API
         in_tok  = msg.usage.input_tokens
         out_tok = msg.usage.output_tokens
@@ -472,10 +466,11 @@ def _fetch_intel_claude(symbol: str, nse_symbol: str, cmp: float, bypass_intel: 
         result["_output_tokens"] = out_tok
         result["_cost_usd"]      = cost
 
+        _meta_note = " (sector/industry from static JSON)" if _has_static_meta else ""
         populated = sum(1 for k, v in result.items() if not k.startswith("_") and v is not None)
         logger.warning(
             f"Data Collect for {nse_symbol} - Claude API intel returned "
-            f"{populated} populated fields | {in_tok} in + {out_tok} out tokens "
+            f"{populated} populated fields{_meta_note} | {in_tok} in + {out_tok} out tokens "
             f"| cost ${cost:.4f} | SOURCE - Claude API / claude-haiku-4-5"
         )
         return result
@@ -615,6 +610,136 @@ def _compute_technicals(
             f"SOURCE - equity OHLC/yfinance | error: {exc}"
         )
         return blank
+
+
+@st.cache_data(ttl=86_400)
+def _fetch_nifty_ohlc() -> pd.DataFrame | None:
+    """Fetch 1-year daily OHLC for Nifty 50 (^NSEI) — used to compute stock beta."""
+    import yfinance as yf
+    try:
+        df = yf.download("^NSEI", period="1y", interval="1d",
+                         progress=False, auto_adjust=True)
+        if not df.empty:
+            df.index = pd.to_datetime(df.index)
+            return df
+        logger.warning("Data Collect for ^NSEI [Nifty OHLC] blank — empty dataframe")
+        return None
+    except Exception as exc:
+        logger.warning(f"Data Collect for ^NSEI [Nifty OHLC] failed | error: {exc}")
+        return None
+
+
+def _compute_fundamentals(
+    ohlc: pd.DataFrame | None,
+    nifty_ohlc: pd.DataFrame | None,
+    cmp: float,
+    symbol: str = "unknown",
+) -> dict:
+    """Compute 52w H/L, beta, support, resistance, and momentum from 1-year OHLC.
+
+    All fields that were previously fetched from Claude are derived here in pure Python:
+    - fifty_two_week_high / low  — max/min of 1-year close series
+    - key_support                — lowest close of last 20 sessions (recent swing low)
+    - key_resistance             — highest close of last 20 sessions (recent swing high)
+    - momentum_outlook           — CMP vs 20-day SMA (±1% neutral band)
+    - beta                       — log-return covariance with Nifty 50
+    """
+    out = dict(
+        fifty_two_week_high=None,
+        fifty_two_week_low=None,
+        beta=None,
+        key_support=None,
+        key_resistance=None,
+        momentum_outlook=None,
+    )
+    if ohlc is None or ohlc.empty or len(ohlc) < 5:
+        logger.warning(
+            f"Data Collect for {symbol} [fundamentals] blank — insufficient OHLC rows"
+        )
+        return out
+
+    close = ohlc["Close"].squeeze().astype(float)
+
+    # 52-week high / low
+    out["fifty_two_week_high"] = round(float(close.max()), 2)
+    out["fifty_two_week_low"]  = round(float(close.min()), 2)
+
+    # Support = lowest close of last 20 sessions; resistance = highest of last 20
+    window = min(20, len(close))
+    out["key_support"]    = round(float(close.iloc[-window:].min()), 2)
+    out["key_resistance"] = round(float(close.iloc[-window:].max()), 2)
+
+    # Momentum: CMP vs 20-day SMA (±1% band → neutral)
+    if len(close) >= 20:
+        sma20 = float(close.rolling(20).mean().iloc[-1])
+        if sma20 > 0:
+            ratio = (cmp - sma20) / sma20 * 100
+            out["momentum_outlook"] = (
+                "bullish" if ratio > 1.0 else ("bearish" if ratio < -1.0 else "neutral")
+            )
+
+    # Beta vs Nifty 50 (log-return covariance method)
+    if nifty_ohlc is not None and not nifty_ohlc.empty:
+        try:
+            nifty_close = nifty_ohlc["Close"].squeeze().astype(float)
+            stock_ret   = np.log(close       / close.shift(1)).dropna()
+            nifty_ret   = np.log(nifty_close / nifty_close.shift(1)).dropna()
+            aligned     = pd.concat([stock_ret, nifty_ret], axis=1, join="inner").dropna()
+            if len(aligned) >= 20:
+                cov = float(aligned.iloc[:, 0].cov(aligned.iloc[:, 1]))
+                var = float(aligned.iloc[:, 1].var())
+                out["beta"] = round(cov / var, 2) if var > 0 else None
+        except Exception as exc:
+            logger.warning(
+                f"Data Collect for {symbol} [beta] failed | error: {exc}"
+            )
+
+    logger.warning(
+        f"Data Collect for {symbol} [fundamentals] computed: "
+        f"52w={out['fifty_two_week_low']}–{out['fifty_two_week_high']}, "
+        f"beta={out['beta']}, momentum={out['momentum_outlook']}, "
+        f"support={out['key_support']}, resistance={out['key_resistance']}"
+    )
+    return out
+
+
+def _gen_rr_commentary(stype: str, s: dict, cmp: float) -> str:
+    """Generate a risk/reward commentary string from calculator output — no AI needed.
+
+    Uses real numbers from the /analyse response: strike, breakeven, downside_protection_pct,
+    max_profit_total, annualised_yield_pct.  Always returns a non-empty string.
+    """
+    strike     = s.get("strike") or 0
+    breakeven  = s.get("breakeven") or 0
+    dp_pct     = s.get("downside_protection_pct") or 0
+    max_prof   = s.get("max_profit_total") or 0
+    ann_yield  = s.get("annualised_yield_pct") or 0
+    upside_pct = (strike / cmp - 1) * 100 if cmp > 0 else 0
+
+    if stype == "ITM":
+        return (
+            f"Strike ₹{strike:,.0f} is below CMP — {dp_pct:.1f}% downside cushion "
+            f"(breakeven ₹{breakeven:,.0f}). Upside capped; premium-focused trade. "
+            f"Max return ₹{max_prof:,.0f} if stock stays above strike at expiry."
+        )
+    if stype == "ATM":
+        return (
+            f"ATM strike ₹{strike:,.0f} balances premium income ({ann_yield:.0f}% p.a.) "
+            f"and upside participation. Profitable above ₹{breakeven:,.0f}; "
+            f"max gain ₹{max_prof:,.0f} if stock closes at or above ₹{strike:,.0f}."
+        )
+    if stype == "OTM+1":
+        return (
+            f"OTM+1 strike ₹{strike:,.0f} requires +{upside_pct:.1f}% move for max profit. "
+            f"Yield {ann_yield:.0f}% p.a.; breakeven at ₹{breakeven:,.0f}. "
+            f"Lower cushion than ATM but participates in moderate upside."
+        )
+    # OTM+2
+    return (
+        f"OTM+2 strike ₹{strike:,.0f} needs +{upside_pct:.1f}% stock rise for max return "
+        f"of ₹{max_prof:,.0f}. Least downside protection ({dp_pct:.1f}%); "
+        f"best when mildly bullish and targeting maximum potential yield."
+    )
 
 
 @st.cache_data(ttl=600)
@@ -874,27 +999,35 @@ if res:
     nse_map   = _fetch_nse_symbol_map()
     ticker    = _yf_ticker(res["symbol"], nse_map)
     nse_sym   = nse_map.get(res["symbol"].upper(), res["symbol"])
-    ohlc      = _fetch_ohlc(ticker)                                        # keep — real prices for chart
-    intel     = _fetch_intel_claude(res["symbol"], nse_sym, res["cmp"], st.session_state.bypass_intel)  # replaces _fetch_intel + _fetch_nse_actions
-    tech      = _compute_technicals(ohlc, symbol=ticker, claude_estimates=intel)
-    sector_hv = intel.get("sector_hv") or _compute_technicals(
-        _fetch_sector_ohlc(intel.get("sector")),
-        symbol=f"sector:{intel.get('sector') or 'unknown'}",
+    ohlc         = _fetch_ohlc(ticker)          # 1-year OHLC; chart uses last 22 rows
+    nifty_ohlc   = _fetch_nifty_ohlc()          # 1-year Nifty for beta
+    intel        = _fetch_intel_claude(res["symbol"], nse_sym, res["cmp"], st.session_state.bypass_intel)
+    tech         = _compute_technicals(ohlc, symbol=ticker, claude_estimates=intel)
+    fundamentals = _compute_fundamentals(ohlc, nifty_ohlc, res["cmp"], symbol=ticker)
+    # Python-computed fields win; Claude analyst/dates fill gaps not in static JSON
+    equity_data  = {**intel, **fundamentals}
+
+    sector_hv = _compute_technicals(
+        _fetch_sector_ohlc(equity_data.get("sector")),
+        symbol=f"sector:{equity_data.get('sector') or 'unknown'}",
     ).get("hv_20_pct")
 
-    # All event dates from Claude intel
+    # All event dates from Claude intel (not computable from OHLC)
     earn_date = intel.get("earnings_date")
     ex_div    = intel.get("ex_dividend_date")
     agm_date  = intel.get("agm_date")
     board_dt  = intel.get("board_meeting_date")
 
-    if ohlc is not None and not ohlc.empty:
+    # Slice last ~22 trading days (~1 month) for the candlestick chart
+    ohlc_chart = ohlc.iloc[-22:] if ohlc is not None and len(ohlc) >= 22 else ohlc
+
+    if ohlc_chart is not None and not ohlc_chart.empty:
         candle = go.Figure(go.Candlestick(
-            x=ohlc.index,
-            open=ohlc["Open"].squeeze(),
-            high=ohlc["High"].squeeze(),
-            low=ohlc["Low"].squeeze(),
-            close=ohlc["Close"].squeeze(),
+            x=ohlc_chart.index,
+            open=ohlc_chart["Open"].squeeze(),
+            high=ohlc_chart["High"].squeeze(),
+            low=ohlc_chart["Low"].squeeze(),
+            close=ohlc_chart["Close"].squeeze(),
             increasing_line_color="#3FB950",
             increasing_fillcolor="#3FB950",
             decreasing_line_color="#F85149",
@@ -987,15 +1120,15 @@ if res:
             key="mock_mode_indicator",
         )
 
-    wk52_h = intel.get("fifty_two_week_high")
-    wk52_l = intel.get("fifty_two_week_low")
+    wk52_h = equity_data.get("fifty_two_week_high")
+    wk52_l = equity_data.get("fifty_two_week_low")
 
     ed_rows = [
-        ("52-Week High",     "Highest closing price over the last 52 weeks",          _fmt_inr(wk52_h)),
-        ("52-Week Low",      "Lowest closing price over the last 52 weeks",           _fmt_inr(wk52_l)),
-        ("Beta",             "Price sensitivity relative to Nifty 50",               f"{intel['beta']:.2f}" if intel.get("beta") else "—"),
-        ("Sector",           "Equity sector classification (from exchange data)",     intel.get("sector")   or "—"),
-        ("Industry",         "Equity industry classification (from exchange data)",   intel.get("industry") or "—"),
+        ("52-Week High",     "Highest closing price over the last 52 weeks (computed from 1-year OHLC)",   _fmt_inr(wk52_h)),
+        ("52-Week Low",      "Lowest closing price over the last 52 weeks (computed from 1-year OHLC)",    _fmt_inr(wk52_l)),
+        ("Beta",             "Price sensitivity relative to Nifty 50 (computed from 1-year log-returns)",  f"{equity_data['beta']:.2f}" if equity_data.get("beta") else "—"),
+        ("Sector",           "Equity sector classification",                                               equity_data.get("sector")   or "—"),
+        ("Industry",         "Equity industry classification",                                             equity_data.get("industry") or "—"),
         ("Sector HV 20-Day", "Annualised 20-day HV of the matching Nifty sector index",
          f"{sector_hv:.1f}%" if sector_hv else "—"),
     ]
@@ -1005,10 +1138,10 @@ if res:
         _out = intel.get("_output_tokens", 0)
         _usd = intel.get("_cost_usd", 0.0)
         st.caption(
-            f"⚡ Estimated by Claude AI (claude-haiku-4-5) · "
+            f"⚡ Analyst targets & dates from Claude AI (claude-haiku-4-5) · "
             f"{_in:,} in + {_out:,} out tokens · "
-            f"~${_usd:.4f} this call · cached 1 h · "
-            f"verify before trading."
+            f"~${_usd:.4f} this call · cached 24 h · "
+            f"fundamentals computed from yfinance OHLC · verify before trading."
         )
     elif _intel_source == "mock":
         st.caption("🔶 Mock data (bypass mode) — not real market data.")
@@ -1163,6 +1296,7 @@ if res:
         ("Recommendation",   "Analyst consensus rating",
          (intel.get("analyst_recommendation") or "—").upper()),
     ]
+    # Note: intel used directly here — analyst data and dates are the only fields from Claude
     st.markdown(_kv_table_html(mi_rows), unsafe_allow_html=True)
     if _intel_source == "claude_api":
         st.caption(
@@ -1233,21 +1367,16 @@ if res:
     # ── Risk / Reward Summary ─────────────────────────────────────────────────
     st.markdown('<div class="section-hd">Risk / Reward Summary</div>', unsafe_allow_html=True)
 
-    _sup  = intel.get("key_support")
-    _res  = intel.get("key_resistance")
-    _mom  = intel.get("momentum_outlook")
+    _sup  = equity_data.get("key_support")    # computed from 20-day rolling low
+    _res  = equity_data.get("key_resistance") # computed from 20-day rolling high
+    _mom  = equity_data.get("momentum_outlook")  # CMP vs 20-SMA
     _lot  = res["lot_size"]
     _cmp  = res["cmp"]
 
     # ── Position build-up / capital at risk ───────────────────────────────────
     _trade_type    = "Holdings" if pos.get("already_holds") else "Buy-Write"
     _gross_capital = _lot * _cmp
-    _rr_intel = {
-        "ITM":   intel.get("rr_itm"),
-        "ATM":   intel.get("rr_atm"),
-        "OTM+1": intel.get("rr_otm1"),
-        "OTM+2": intel.get("rr_otm2"),
-    }
+    # rr_* commentary is now generated in Python per strike — no Claude field needed
 
     build_rows = [
         ("Position type",
@@ -1359,7 +1488,7 @@ if res:
         _breakeven  = s.get("breakeven")
         _oi         = s.get("open_interest")
         _vol_traded = s.get("volume")
-        _note       = _rr_intel.get(stype)
+        _note       = _gen_rr_commentary(stype, s, _cmp)  # Python template — always populated
 
         # Build-Up Cost: cash actually deployed after premium offsets equity purchase
         _build_cost = _gross_capital - _net_prem
@@ -1455,12 +1584,11 @@ if res:
              if _sup else "Key support level unavailable",
              _fmt_inr(_loss_sup) if _loss_sup is not None else "—"),
         ]
-        if _note:
-            kv_rows.append((
-                "R/R commentary",
-                "Claude AI risk/reward note for this strike — verify before trading",
-                _note,
-            ))
+        kv_rows.append((
+            "R/R commentary",
+            "Risk/reward summary computed from real strike, premium and breakeven figures",
+            _note,
+        ))
 
         # ── Assemble card HTML ─────────────────────────────────────────────────
         cell = "padding:6px 12px;border-bottom:1px solid #30363D;vertical-align:middle;"
@@ -1501,13 +1629,10 @@ if res:
         )
         st.markdown(card_html, unsafe_allow_html=True)
 
-    if _intel_source == "claude_api":
-        st.caption(
-            "⚡ Technical levels and R/R commentary estimated by Claude AI — "
-            "verify before trading."
-        )
-    elif _intel_source == "mock":
-        st.caption("🔶 Mock R/R commentary — not real analysis.")
+    st.caption(
+        "R/R commentary computed from live option data — support/resistance from 20-day OHLC. "
+        "Analyst targets and corporate dates from Claude AI · verify before trading."
+    )
 
 
 else:
