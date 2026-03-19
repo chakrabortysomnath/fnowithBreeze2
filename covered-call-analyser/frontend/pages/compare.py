@@ -7,6 +7,7 @@ No Claude API calls are made — pure Python / backend analysis only.
 """
 
 import io
+import math as _math
 import os
 
 import pandas as pd
@@ -123,6 +124,230 @@ def _base_layout(height=300):
                     xanchor="left", x=0, font=dict(size=11)),
         height=height,
     )
+
+
+def _bs_call_price(S, K, T, r, sigma):
+    if sigma <= 0 or T <= 0:
+        return max(S - K * _math.exp(-r * T), 0.0)
+    d1 = (_math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * _math.sqrt(T))
+    d2 = d1 - sigma * _math.sqrt(T)
+    N  = lambda x: 0.5 * (1.0 + _math.erf(x / _math.sqrt(2.0)))
+    return S * N(d1) - K * _math.exp(-r * T) * N(d2)
+
+
+def _bs_iv(S, K, T_days, C, r=0.065):
+    if T_days <= 0 or C <= 0 or S <= 0 or K <= 0:
+        return None
+    T = T_days / 365.0
+    lo, hi = 0.001, 5.0
+    intrinsic = max(S - K * _math.exp(-r * T), 0.0)
+    if C <= intrinsic:
+        return None
+    for _ in range(120):
+        mid   = (lo + hi) / 2.0
+        price = _bs_call_price(S, K, T, r, mid)
+        if abs(price - C) < 0.01:
+            return round(mid * 100, 1)
+        lo, hi = (mid, hi) if price < C else (lo, mid)
+    return round(((lo + hi) / 2.0) * 100, 1)
+
+
+def _bs_greeks(S, K, T_days, sigma_pct, ltp_per_share, r=0.065):
+    T = T_days / 365.0
+    sigma = sigma_pct / 100.0
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return None
+    try:
+        d1 = (_math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * _math.sqrt(T))
+        d2 = d1 - sigma * _math.sqrt(T)
+        N  = lambda x: 0.5 * (1.0 + _math.erf(x / _math.sqrt(2.0)))
+        Np = lambda x: _math.exp(-0.5 * x * x) / _math.sqrt(2.0 * _math.pi)
+        KerT = K * _math.exp(-r * T)
+        delta = N(d1)
+        gamma = Np(d1) / (S * sigma * _math.sqrt(T))
+        theta_seller = (S * Np(d1) * sigma / (2.0 * _math.sqrt(T)) + r * KerT * N(d2)) / 365.0
+        vega  = S * Np(d1) * _math.sqrt(T) / 100.0
+        rho   = KerT * T * N(d2) / 100.0
+        implied_put = max(ltp_per_share + KerT - S, 0.0)
+        intrinsic   = max(S - K, 0.0)
+        time_value  = ltp_per_share - intrinsic
+        return {
+            "delta": round(delta, 4), "gamma": round(gamma, 6),
+            "theta_per_day": round(theta_seller, 4), "vega": round(vega, 4),
+            "rho": round(rho, 4), "implied_put": round(implied_put, 2),
+            "intrinsic": round(intrinsic, 2), "time_value": round(time_value, 2),
+        }
+    except Exception:
+        return None
+
+
+def _cmp_table_html(results: list[dict], strike_view: str, greeks_by_sym: dict) -> str:
+    """Comparison table: rows = metric groups, columns = symbols.
+
+    Each column shows the selected strike_view for that symbol.
+    greeks_by_sym: {symbol: greeks_dict or None}
+    """
+    symbols = [r["symbol"] for r in results]
+    strikes = {r["symbol"]: _get_strike(r, strike_view) for r in results}
+
+    hd = ("padding:8px 10px;border-bottom:2px solid #30363D;"
+          "color:#8B949E;font-size:11px;font-weight:600;white-space:nowrap;")
+    td = ("padding:6px 10px;border-bottom:1px solid #21262D;"
+          "color:#C9D1D9;font-size:12px;text-align:right;"
+          "font-family:'Courier New',monospace;white-space:nowrap;")
+    mtd = ("padding:6px 10px;border-bottom:1px solid #21262D;"
+           "color:#E6EDF3;font-size:12px;text-align:left;")
+    shd = ("padding:5px 10px;background:#161B22;"
+           "color:#58A6FF;font-size:11px;font-weight:700;letter-spacing:0.5px;")
+    ncols = len(symbols) + 1
+
+    def _fmt(v, fmt):
+        if v is None: return "—"
+        try:
+            if fmt == "inr":    return f"₹{v:,.2f}"
+            if fmt == "inr0":   return f"₹{v:,.0f}"
+            if fmt == "pct1":   return f"{v:.1f}%"
+            if fmt == "pct2":   return f"{v:.2f}%"
+            if fmt == "spct1":  return f"{v:+.1f}%"
+            if fmt == "int":    return f"{v:,}"
+            if fmt == "f4":     return f"{v:.4f}"
+            if fmt == "f6":     return f"{v:.6f}"
+            return str(v)
+        except Exception: return "—"
+
+    def sec(title):
+        return f'<tr><td colspan="{ncols}" style="{shd}">{title}</td></tr>'
+
+    def row(metric, tip, vals_by_sym, fmt):
+        tip_a = f' title="{tip}"' if tip else ""
+        icon  = (' <span style="color:#8B949E;font-size:10px;cursor:help;">ⓘ</span>'
+                 if tip else "")
+        r = f'<tr><td style="{mtd}"{tip_a}>{metric}{icon}</td>'
+        for sym in symbols:
+            r += f'<td style="{td}">{_fmt(vals_by_sym.get(sym), fmt)}</td>'
+        return r + "</tr>"
+
+    def sv(sym, key, subkey=None):
+        s = strikes.get(sym)
+        if s is None: return None
+        v = s.get(key)
+        if subkey is not None:
+            return v.get(subkey) if isinstance(v, dict) else None
+        return v
+
+    def gv(sym, key):
+        g = greeks_by_sym.get(sym)
+        return g.get(key) if g else None
+
+    out = [
+        '<div style="overflow-x:auto;">',
+        '<table style="width:100%;border-collapse:collapse;'
+        'font-family:Inter,\'Segoe UI\',sans-serif;">',
+        '<thead><tr>',
+        f'<th style="{hd} text-align:left;min-width:160px;">Metric</th>',
+    ]
+    for r in results:
+        s   = strikes.get(r["symbol"])
+        stk = f" ₹{s['strike']:,.0f}" if s else ""
+        out.append(
+            f'<th style="{hd} text-align:right;">'
+            f'<span style="color:#58A6FF;font-weight:700;">{r["symbol"]}</span><br>'
+            f'<span style="color:#E6EDF3;font-size:12px;">{strike_view}{stk}</span>'
+            f'</th>'
+        )
+    out.append('</tr></thead><tbody>')
+
+    # Position
+    out.append(sec("── POSITION ──"))
+    out.append(row("CMP (₹)", "Live last traded price", {r["symbol"]: r["cmp"] for r in results}, "inr"))
+    out.append(row("Expiry",  "Option expiry date", {r["symbol"]: r["expiry_date"] for r in results}, ""))
+    out.append(row("DTE",     "Days to expiry", {r["symbol"]: r["days_to_expiry"] for r in results}, "int"))
+    out.append(row("Lot Size","Shares per F&O contract", {r["symbol"]: r["lot_size"] for r in results}, "int"))
+    out.append(row("Capital Deployed (₹)", "Total capital at cost basis × shares",
+                   {r["symbol"]: r["position"]["total_cost"] for r in results}, "inr"))
+    out.append(row("Cost Basis / Share (₹)", "Purchase price per share",
+                   {r["symbol"]: r["position"]["cost_basis_per_share"] for r in results}, "inr"))
+
+    # Strikes
+    out.append(sec("── STRIKES ──"))
+    out.append(row("Strike (₹)",         "", {sym: sv(sym, "strike") for sym in symbols}, "inr0"))
+    out.append(row("Moneyness %",         "(Strike − CMP) / CMP × 100",
+                   {sym: (sv(sym, "strike") - r["cmp"]) / r["cmp"] * 100
+                    if sv(sym, "strike") and r.get("cmp") else None
+                    for sym, r in zip(symbols, results)}, "spct1"))
+    out.append(row("Intrinsic Value (₹/sh)", "max(CMP − Strike, 0)",
+                   {sym: max(r["cmp"] - sv(sym, "strike"), 0.0)
+                    if sv(sym, "strike") and r.get("cmp") else None
+                    for sym, r in zip(symbols, results)}, "inr"))
+    out.append(row("Time Value (₹/sh)",   "LTP − Intrinsic Value",
+                   {sym: gv(sym, "time_value") for sym in symbols}, "inr"))
+
+    # Premium & Income
+    out.append(sec("── PREMIUM & INCOME ──"))
+    out.append(row("Gross Premium LTP (₹/sh)", "Option LTP per share",
+                   {sym: sv(sym, "premium") for sym in symbols}, "inr"))
+    out.append(row("Net Premium / Share (₹)", "After all charges",
+                   {sym: sv(sym, "net_premium_per_share") for sym in symbols}, "inr"))
+    out.append(row("Net Premium Total (₹)", "Full lot net premium",
+                   {sym: sv(sym, "net_premium_total") for sym in symbols}, "inr"))
+    out.append(row("Charges Total (₹)", "STT + Brokerage + GST",
+                   {sym: sv(sym, "charges", "total") for sym in symbols}, "inr"))
+    out.append(row("Charges %", "Charges as % of gross premium",
+                   {sym: (sv(sym, "charges", "total") / sv(sym, "gross_premium_total") * 100
+                          if sv(sym, "gross_premium_total") else None) for sym in symbols}, "pct1"))
+
+    # Market Data
+    out.append(sec("── MARKET DATA ──"))
+    out.append(row("IV %",           "Implied Volatility (from chain or BS-computed)",
+                   {sym: sv(sym, "_iv_enriched") or sv(sym, "iv") for sym in symbols}, "pct1"))
+    out.append(row("Open Interest",  "Outstanding contracts — liquidity proxy",
+                   {sym: sv(sym, "open_interest") for sym in symbols}, "int"))
+    out.append(row("Volume",         "Today's traded contracts",
+                   {sym: sv(sym, "volume") for sym in symbols}, "int"))
+
+    # Performance
+    out.append(sec("── PERFORMANCE ──"))
+    out.append(row("Breakeven (₹)",          "Stock price at P&L=0",
+                   {sym: sv(sym, "breakeven") for sym in symbols}, "inr0"))
+    out.append(row("Downside Protection %",   "(CMP − Breakeven) / CMP",
+                   {sym: sv(sym, "downside_protection_pct") for sym in symbols}, "pct2"))
+    out.append(row("Premium Yield %",         "Net premium / capital deployed",
+                   {sym: sv(sym, "premium_yield_pct") for sym in symbols}, "pct2"))
+    out.append(row("★ Annualised Yield %",    "Yield scaled to 365 days",
+                   {sym: sv(sym, "annualised_yield_pct") for sym in symbols}, "pct1"))
+    out.append(row("★ Max Profit Total (₹)",  "Best-case P&L if called away at strike",
+                   {sym: sv(sym, "max_profit_total") for sym in symbols}, "inr"))
+
+    # Greeks
+    out.append(sec("── GREEKS (Black-Scholes, r = 6.5%) ──"))
+    out.append(
+        f'<tr><td colspan="{ncols}" style="padding:3px 10px 5px;'
+        f'color:#8B949E;font-size:11px;font-style:italic;">'
+        f'Computed using IV from chain data or Black-Scholes inversion. '
+        f'Θ = seller perspective (positive favourable). Vega = loss per +1% IV.'
+        f'</td></tr>'
+    )
+    out.append(row("Δ Delta",              "N(d1) call delta",
+                   {sym: gv(sym, "delta") for sym in symbols}, "f4"))
+    out.append(row("Γ Gamma",              "Delta change per ₹1 CMP move",
+                   {sym: gv(sym, "gamma") for sym in symbols}, "f6"))
+    out.append(row("Θ Theta/day (₹/sh)",   "Daily time decay benefit (seller)",
+                   {sym: gv(sym, "theta_per_day") for sym in symbols}, "inr"))
+    out.append(row("V Vega/+1% IV (₹/sh)", "₹ loss per +1% IV rise (seller is short vega)",
+                   {sym: gv(sym, "vega") for sym in symbols}, "inr"))
+    out.append(row("ρ Rho/+1% rate (₹/sh)","₹ change per +1% risk-free rate",
+                   {sym: gv(sym, "rho") for sym in symbols}, "inr"))
+
+    # Put-Call Summary
+    out.append(sec("── PUT-CALL SUMMARY ──"))
+    out.append(row("Implied Put Price (₹/sh)", "From Put-Call Parity: P = C + K·e^(−rT) − S",
+                   {sym: gv(sym, "implied_put") for sym in symbols}, "inr"))
+    out.append(row("Put Delta (approx.)",      "Δ − 1 (from parity)",
+                   {sym: ((gv(sym, "delta") or 0) - 1.0) if gv(sym, "delta") is not None else None
+                    for sym in symbols}, "f4"))
+
+    out.append('</tbody></table></div>')
+    return "".join(out)
 
 
 # ── Session state ─────────────────────────────────────────────────────────────
@@ -286,107 +511,82 @@ if st.session_state.cmp_results:
             key="cmp_strike_radio",
         )
     with col_info:
+        STRIKE_TIPS = {
+            "ITM":   "Strike below CMP — higher premium, most protection, upside capped.",
+            "ATM":   "Strike nearest to CMP — balanced premium vs upside, maximum time value.",
+            "OTM+1": "One strike above CMP — lower premium, participates in modest upside.",
+            "OTM+2": "Two strikes above CMP — lowest premium, maximum upside participation.",
+        }
         st.markdown(
             f"<p style='color:#8B949E; font-size:13px; margin-top:8px;'>"
-            f"Showing <b style='color:#58A6FF'>{strike_view}</b> strike for each instrument. "
-            f"Falls back to ATM if selected strike is unavailable.</p>",
+            f"<b style='color:#58A6FF'>{strike_view}</b> — {STRIKE_TIPS.get(strike_view, '')} "
+            f"Falls back to ATM if unavailable.</p>",
             unsafe_allow_html=True,
         )
 
-    # Build comparison data
-    symbols_ok = [r["symbol"] for r in results]
+    # Compute BS-IV and Greeks for each result's selected strike
+    greeks_by_sym: dict[str, dict | None] = {}
+    enriched_results: list[dict] = []
+    for r in results:
+        s = _get_strike(r, strike_view)
+        r_copy = dict(r)
+        if s:
+            # Enrich strikes with BS-IV fallback
+            enriched_stks = []
+            for sk in r.get("strikes", []):
+                sc = dict(sk)
+                iv_e = sk.get("iv")
+                ltp  = sk.get("premium")
+                if iv_e is None and ltp and r.get("days_to_expiry"):
+                    iv_e = _bs_iv(r["cmp"], sk["strike"], r["days_to_expiry"], ltp)
+                sc["_iv_enriched"] = iv_e
+                enriched_stks.append(sc)
+            r_copy["strikes"] = enriched_stks
+            # Greeks for selected strike
+            sel_enriched = next(
+                (sc for sc in enriched_stks if sc["strike_type"] == s["strike_type"]), None
+            )
+            iv_val = sel_enriched.get("_iv_enriched") if sel_enriched else None
+            if iv_val and r.get("days_to_expiry") and sel_enriched:
+                greeks_by_sym[r["symbol"]] = _bs_greeks(
+                    S=r["cmp"], K=sel_enriched["strike"],
+                    T_days=r["days_to_expiry"], sigma_pct=iv_val,
+                    ltp_per_share=sel_enriched["premium"],
+                )
+            else:
+                greeks_by_sym[r["symbol"]] = None
+        else:
+            greeks_by_sym[r["symbol"]] = None
+        enriched_results.append(r_copy)
 
-    rows: dict[str, list] = {}
-
-    def _add_row(label, values):
-        rows[label] = values
-
-    _add_row("📈 CMP (₹)",            [_fmt_inr(r["cmp"]) for r in results])
-    _add_row("📅 Expiry",              [r["expiry_date"] for r in results])
-    _add_row("⏳ DTE (days)",           [str(r["days_to_expiry"]) for r in results])
-    _add_row("📦 Lot Size",            [f"{r['lot_size']:,}" for r in results])
-
-    strikes = [_get_strike(r, strike_view) for r in results]
-
-    _add_row("🎯 Strike (₹)",          [_fmt_inr(s["strike"]) if s else "—" for s in strikes])
-    _add_row("🏷️ Strike Type",         [s.get("strike_type", "—") if s else "—" for s in strikes])
-
-    # ── Performance ──
-    _add_row("— PERFORMANCE —",        [""] * len(results))
-    _add_row("Gross Premium (₹)",      [_fmt_inr(s["gross_premium_total"]) if s else "—" for s in strikes])
-    _add_row("Net Premium / Share (₹)",[_fmt_inr(s["net_premium_per_share"]) if s else "—" for s in strikes])
-    _add_row("Net Premium Total (₹)",  [_fmt_inr(s["net_premium_total"]) if s else "—" for s in strikes])
-    _add_row("Premium Yield %",        [_fmt_pct(s["premium_yield_pct"]) if s else "—" for s in strikes])
-    _add_row("★ Annualised Yield %",   [
-        _fmt_pct(s["annualised_yield_pct"], 1) if s and s.get("annualised_yield_pct") is not None else "—"
-        for s in strikes
-    ])
-
-    # ── Risk ──
-    _add_row("— RISK —",               [""] * len(results))
-    _add_row("Breakeven (₹)",          [_fmt_inr(s["breakeven"]) if s else "—" for s in strikes])
-    _add_row("Breakeven % below CMP",  [_fmt_pct(s["breakeven_pct_below_cmp"]) if s else "—" for s in strikes])
-    _add_row("★ Downside Protection %",[_fmt_pct(s["downside_protection_pct"]) if s else "—" for s in strikes])
-    _add_row("Implied Volatility %",   [
-        _fmt_pct(s["iv"], 1) if s and s.get("iv") is not None else "—"
-        for s in strikes
-    ])
-
-    # ── Reward ──
-    _add_row("— REWARD —",             [""] * len(results))
-    _add_row("Max Profit / Share (₹)", [_fmt_inr(s["max_profit_per_share"]) if s else "—" for s in strikes])
-    _add_row("★ Max Profit Total (₹)", [_fmt_inr(s["max_profit_total"]) if s else "—" for s in strikes])
-
-    # ── Position ──
-    _add_row("— POSITION —",           [""] * len(results))
-    _add_row("Lots",                   [str(r["position"]["lots"]) for r in results])
-    _add_row("Shares",                 [f"{r['position']['shares']:,}" for r in results])
-    _add_row("Capital Deployed (₹)",   [_fmt_inr(r["position"]["total_cost"]) for r in results])
-    _add_row("Cost Basis / Share (₹)", [_fmt_inr(r["position"]["cost_basis_per_share"]) for r in results])
-
-    # ── Charges ──
-    _add_row("— CHARGES —",            [""] * len(results))
-    _add_row("Total Charges (₹)",      [_fmt_inr(s["charges"]["total"]) if s else "—" for s in strikes])
-    _add_row("STT (₹)",                [_fmt_inr(s["charges"]["stt"]) if s else "—" for s in strikes])
-    _add_row("Brokerage (₹)",          [_fmt_inr(s["charges"]["brokerage"]) if s else "—" for s in strikes])
-    _add_row("GST (₹)",                [_fmt_inr(s["charges"]["gst"]) if s else "—" for s in strikes])
-
-    # ── Liquidity ──
-    _add_row("— LIQUIDITY —",          [""] * len(results))
-    _add_row("Open Interest",          [
-        _fmt_int(s.get("open_interest")) if s else "—" for s in strikes
-    ])
-    _add_row("Volume",                 [
-        _fmt_int(s.get("volume")) if s else "—" for s in strikes
-    ])
-
-    # Build and display the comparison DataFrame
+    # ── Comparison table ─────────────────────────────────────────────────────
     st.markdown(
-        f'<div class="section-hd">📊 Comparison Table — {strike_view} Strike</div>',
+        f'<div class="section-hd">Comparison Table — {strike_view} Strike</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        _cmp_table_html(enriched_results, strike_view, greeks_by_sym),
         unsafe_allow_html=True,
     )
 
-    comp_df = pd.DataFrame(rows, index=symbols_ok).T
-    comp_df.index.name = "Metric"
+    # CSV export (plain data, no Greeks)
+    symbols_ok = [r["symbol"] for r in enriched_results]
+    csv_rows: dict[str, list] = {}
+    for r in enriched_results:
+        s = _get_strike(r, strike_view)
+        csv_rows.setdefault("CMP (₹)", []).append(r["cmp"])
+        csv_rows.setdefault("Expiry", []).append(r["expiry_date"])
+        csv_rows.setdefault("DTE", []).append(r["days_to_expiry"])
+        csv_rows.setdefault("Strike (₹)", []).append(s["strike"] if s else None)
+        csv_rows.setdefault("Net Premium (₹)", []).append(s["net_premium_total"] if s else None)
+        csv_rows.setdefault("Ann. Yield %", []).append(s.get("annualised_yield_pct") if s else None)
+        csv_rows.setdefault("Breakeven (₹)", []).append(s["breakeven"] if s else None)
+        csv_rows.setdefault("Max Profit (₹)", []).append(s["max_profit_total"] if s else None)
+        csv_rows.setdefault("Downside Prot. %", []).append(s["downside_protection_pct"] if s else None)
 
-    # Style section headers
-    def _style_rows(df):
-        styles = []
-        for idx in df.index:
-            if idx.startswith("—") or idx.startswith("★"):
-                styles.append([
-                    "background-color: #161B22; color: #58A6FF; font-weight: 700;"
-                ] * len(df.columns))
-            else:
-                styles.append([""] * len(df.columns))
-        return pd.DataFrame(styles, index=df.index, columns=df.columns)
-
-    styled = comp_df.style.apply(_style_rows, axis=None)
-    st.dataframe(styled, use_container_width=True, height=min(38 * len(comp_df) + 38, 900))
-
-    # CSV export
+    csv_df = pd.DataFrame(csv_rows, index=symbols_ok)
     csv_buf = io.StringIO()
-    comp_df.to_csv(csv_buf)
+    csv_df.to_csv(csv_buf)
     st.download_button(
         label="⬇ Download Comparison CSV",
         data=csv_buf.getvalue().encode("utf-8"),
@@ -394,81 +594,145 @@ if st.session_state.cmp_results:
         mime="text/csv",
     )
 
-    # ── P&L Payoff chart ─────────────────────────────────────────────────────
-
+    # ── Per-instrument detail (transposed strike table) ───────────────────────
     st.divider()
-    st.markdown('<div class="section-hd">📉 P&L at Expiry — ATM Strikes</div>', unsafe_allow_html=True)
-    st.caption("P&L curves shown for the ATM strike of each instrument for a fair cross-instrument comparison.")
+    st.markdown('<div class="section-hd">Strike Detail per Instrument</div>',
+                unsafe_allow_html=True)
 
     line_colors = ["#58A6FF", "#20A4A0", "#FF7B7B", "#FFD166", "#39D0C8"]
-    payoff_fig  = go.Figure()
 
-    for i, res in enumerate(results):
-        atm = _get_strike(res, "ATM")
+    for i, r in enumerate(enriched_results):
+        with st.expander(
+            f"{r['symbol']} — CMP ₹{r['cmp']:,.0f} · {r['days_to_expiry']}d · "
+            f"Lot {r['lot_size']:,} · Capital ₹{r['position']['total_cost']:,.0f}",
+            expanded=False,
+        ):
+            # Build per-instrument strike detail (same transposed format)
+            r_greeks: dict[str, dict | None] = {}
+            for sc in r.get("strikes", []):
+                iv_e = sc.get("_iv_enriched")
+                if iv_e and r.get("days_to_expiry"):
+                    r_greeks[sc["strike_type"]] = _bs_greeks(
+                        S=r["cmp"], K=sc["strike"],
+                        T_days=r["days_to_expiry"], sigma_pct=iv_e,
+                        ltp_per_share=sc["premium"],
+                    )
+                else:
+                    r_greeks[sc["strike_type"]] = None
+
+            # Reuse the app.py-style transposed table logic for one instrument
+            stks = r.get("strikes", [])
+            s_map = {s["strike_type"]: s for s in stks}
+            types = [t for t in ("ITM", "ATM", "OTM+1", "OTM+2") if t in s_map]
+            ncols = len(types) + 1
+            CLR   = {"ITM": "#6A8FBF", "ATM": "#58A6FF", "OTM+1": "#20A4A0", "OTM+2": "#39D0C8"}
+
+            hd = ("padding:7px 8px;border-bottom:2px solid #30363D;"
+                  "color:#8B949E;font-size:11px;font-weight:600;white-space:nowrap;")
+            td = ("padding:5px 8px;border-bottom:1px solid #21262D;"
+                  "color:#C9D1D9;font-size:11px;text-align:right;"
+                  "font-family:'Courier New',monospace;white-space:nowrap;")
+            mtd = ("padding:5px 8px;border-bottom:1px solid #21262D;"
+                   "color:#E6EDF3;font-size:11px;text-align:left;")
+            shd = ("padding:4px 8px;background:#161B22;"
+                   "color:#58A6FF;font-size:10px;font-weight:700;letter-spacing:0.5px;")
+
+            def _fv(t, k, sk=None):
+                s = s_map.get(t)
+                if s is None: return None
+                v = s.get(k)
+                if sk is not None:
+                    return v.get(sk) if isinstance(v, dict) else None
+                return v
+
+            def _gv2(t, k):
+                g = r_greeks.get(t)
+                return g.get(k) if g else None
+
+            def _f(v, fmt):
+                if v is None: return "—"
+                try:
+                    if fmt == "inr":   return f"₹{v:,.2f}"
+                    if fmt == "inr0":  return f"₹{v:,.0f}"
+                    if fmt == "pct1":  return f"{v:.1f}%"
+                    if fmt == "pct2":  return f"{v:.2f}%"
+                    if fmt == "spct1": return f"{v:+.1f}%"
+                    if fmt == "int":   return f"{v:,}"
+                    if fmt == "f4":    return f"{v:.4f}"
+                    if fmt == "f6":    return f"{v:.6f}"
+                    return str(v)
+                except Exception: return "—"
+
+            def sec2(title):
+                return f'<tr><td colspan="{ncols}" style="{shd}">{title}</td></tr>'
+
+            def row2(metric, vals, fmt):
+                r2 = f'<tr><td style="{mtd}">{metric}</td>'
+                for t in types:
+                    r2 += f'<td style="{td}">{_f(vals.get(t), fmt)}</td>'
+                return r2 + "</tr>"
+
+            tbl = [
+                '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;'
+                'font-family:Inter,\'Segoe UI\',sans-serif;"><thead><tr>',
+                f'<th style="{hd} text-align:left;min-width:140px;">Metric</th>',
+            ]
+            for t in types:
+                s = s_map[t]
+                clr = CLR.get(t, "#8B949E")
+                tbl.append(
+                    f'<th style="{hd} text-align:right;" >'
+                    f'<span style="color:{clr};font-weight:700;">{t}</span><br>'
+                    f'<span style="color:#E6EDF3;font-size:11px;">₹{s["strike"]:,.0f}</span>'
+                    f'</th>'
+                )
+            tbl.append('</tr></thead><tbody>')
+            tbl.append(sec2("── PREMIUM & INCOME ──"))
+            tbl.append(row2("Gross LTP (₹/sh)", {t: _fv(t, "premium") for t in types}, "inr"))
+            tbl.append(row2("Net Premium Total (₹)", {t: _fv(t, "net_premium_total") for t in types}, "inr"))
+            tbl.append(row2("Ann. Yield %", {t: _fv(t, "annualised_yield_pct") for t in types}, "pct1"))
+            tbl.append(sec2("── PERFORMANCE ──"))
+            tbl.append(row2("Breakeven (₹)", {t: _fv(t, "breakeven") for t in types}, "inr0"))
+            tbl.append(row2("Downside Prot. %", {t: _fv(t, "downside_protection_pct") for t in types}, "pct2"))
+            tbl.append(row2("Max Profit (₹)", {t: _fv(t, "max_profit_total") for t in types}, "inr"))
+            tbl.append(sec2("── MARKET DATA ──"))
+            tbl.append(row2("IV %", {t: _fv(t, "_iv_enriched") or _fv(t, "iv") for t in types}, "pct1"))
+            tbl.append(row2("Open Interest", {t: _fv(t, "open_interest") for t in types}, "int"))
+            tbl.append(sec2("── GREEKS ──"))
+            tbl.append(row2("Δ Delta", {t: _gv2(t, "delta") for t in types}, "f4"))
+            tbl.append(row2("Θ Theta/day (₹/sh)", {t: _gv2(t, "theta_per_day") for t in types}, "inr"))
+            tbl.append(row2("Implied Put (₹/sh)", {t: _gv2(t, "implied_put") for t in types}, "inr"))
+            tbl.append('</tbody></table></div>')
+            st.markdown("".join(tbl), unsafe_allow_html=True)
+
+    # ── P&L Payoff chart (shown last) ─────────────────────────────────────────
+    st.divider()
+    st.markdown('<div class="section-hd">P&amp;L at Expiry — ATM Strikes</div>',
+                unsafe_allow_html=True)
+    st.caption("ATM P&L curves for cross-instrument comparison.")
+
+    payoff_fig = go.Figure()
+    for i, r in enumerate(enriched_results):
+        atm = _get_strike(r, "ATM")
         if not atm or not atm.get("payoff"):
             continue
         xs = [p["price"] for p in atm["payoff"]]
         ys = [p["pl"]    for p in atm["payoff"]]
         payoff_fig.add_trace(go.Scatter(
-            name=f"{res['symbol']} (₹{atm['strike']:,.0f})",
+            name=f"{r['symbol']} ATM ₹{atm['strike']:,.0f}",
             x=xs, y=ys,
             mode="lines+markers",
             line=dict(color=line_colors[i % len(line_colors)], width=2),
             marker=dict(size=4),
         ))
-
     payoff_fig.add_hline(y=0, line_width=1, line_dash="dot", line_color="#8B949E")
     payoff_fig.update_layout(
         **_base_layout(height=320),
-        title=dict(text="P&L at Expiry (ATM Strike)", font=dict(size=14)),
+        title=dict(text="P&L at Expiry (ATM Strikes)", font=dict(size=14)),
         xaxis=dict(title="Stock price at expiry (₹)", showgrid=False, zeroline=False),
         yaxis=dict(title="P&L (₹)", showgrid=True, gridcolor=GRID_COLOR, zeroline=False),
     )
     st.plotly_chart(payoff_fig, use_container_width=True, config={"displayModeBar": False})
-
-    # ── Per-instrument strike detail ──────────────────────────────────────────
-
-    st.divider()
-    st.markdown('<div class="section-hd">🔍 Strike Detail per Instrument</div>', unsafe_allow_html=True)
-
-    for res in results:
-        with st.expander(f"{res['symbol']} — all strikes", expanded=False):
-            p  = res["position"]
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("CMP",     f"₹{res['cmp']:,.2f}")
-            m2.metric("Lots",    p["lots"])
-            m3.metric("Shares",  f"{p['shares']:,}")
-            m4.metric("Capital", f"₹{p['total_cost']:,.0f}")
-
-            st.caption(
-                f"Expiry {res['expiry_date']} · {res['days_to_expiry']} days · "
-                f"Lot size {res['lot_size']:,} · "
-                f"Cost basis ₹{p['cost_basis_per_share']:,.2f}"
-            )
-
-            strike_rows = []
-            for s in res["strikes"]:
-                strike_rows.append({
-                    "Type":            s["strike_type"],
-                    "Strike (₹)":      f"₹{s['strike']:,.0f}",
-                    "Premium (₹)":     f"₹{s['premium']:,.2f}",
-                    "Net Prem (₹)":    f"₹{s['net_premium_total']:,.0f}",
-                    "Ann. Yield %":    (
-                        f"{s['annualised_yield_pct']:.1f}%"
-                        if s.get("annualised_yield_pct") is not None else "—"
-                    ),
-                    "Breakeven (₹)":   f"₹{s['breakeven']:,.2f}",
-                    "Downside %":      f"{s['downside_protection_pct']:.2f}%",
-                    "Max Profit (₹)":  f"₹{s['max_profit_total']:,.0f}",
-                    "IV %":            f"{s['iv']:.1f}%" if s.get("iv") else "—",
-                    "OI":              f"{s['open_interest']:,}" if s.get("open_interest") else "—",
-                })
-            st.dataframe(
-                pd.DataFrame(strike_rows),
-                use_container_width=True,
-                hide_index=True,
-                height=180,
-            )
 
 else:
     st.markdown(
