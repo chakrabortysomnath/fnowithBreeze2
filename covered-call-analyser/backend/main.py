@@ -23,6 +23,7 @@ Run locally:
 
 import logging
 import sys
+import time
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Query
@@ -85,6 +86,11 @@ app.add_middleware(
 # Phase 1 Endpoints
 # ---------------------------------------------------------------------------
 
+# Time-based cache for /health so Render's frequent platform polls don't
+# trigger is_connected() and a log line on every single hit.
+_health_cache: dict = {"connected": None, "message": None, "ts": 0.0}
+
+
 @app.get(
     "/health",
     response_model=HealthResponse,
@@ -95,17 +101,30 @@ app.add_middleware(
 def health_check() -> HealthResponse:
     """Check server health and Breeze API connectivity.
 
-    This endpoint is safe to call frequently — it does NOT make an external
-    API call to Breeze; it only checks whether a session object exists.
+    Results are cached for HEALTH_CHECK_INTERVAL seconds (default 30) so
+    that Render's platform poller — which hits this path every few seconds —
+    does not generate a log entry on every call.  Set HEALTH_CHECK_INTERVAL=0
+    to disable caching and check on every request.
 
     Returns:
         HealthResponse with status='ok' and breeze_connected=True/False.
     """
+    interval = settings.HEALTH_CHECK_INTERVAL
+    now = time.monotonic()
+    if interval > 0 and (now - _health_cache["ts"]) < interval:
+        # Return cached result — no log, no is_connected() call
+        return HealthResponse(
+            status="ok",
+            breeze_connected=_health_cache["connected"],
+            message=_health_cache["message"],
+        )
+
     connected = is_connected()
     message = None if connected else (
         "Breeze session is not available. Check credentials and session token."
     )
-    logger.info(f"/health called — breeze_connected={connected}")
+    _health_cache.update(connected=connected, message=message, ts=now)
+    logger.info(f"/health checked — breeze_connected={connected} (interval={interval}s)")
     return HealthResponse(
         status="ok",
         breeze_connected=connected,

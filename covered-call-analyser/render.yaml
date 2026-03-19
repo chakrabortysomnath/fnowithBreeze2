@@ -55,6 +55,12 @@ services:
       - key: LOG_LEVEL
         value: "INFO"
 
+      # How often (in seconds) the backend actually runs the Breeze connectivity
+      # check and logs a line. Render's platform polls /health every few seconds;
+      # this prevents a log entry on every poll. Set to 0 to check on every call.
+      - key: HEALTH_CHECK_INTERVAL
+        value: "30"
+
       # --- Phase 5: QuotaGuard Static proxy (uncomment when ready) ---
       # - key: QUOTAGUARDSTATIC_URL
       #   sync: false

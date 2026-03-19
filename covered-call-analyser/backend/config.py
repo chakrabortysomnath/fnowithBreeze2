@@ -10,11 +10,12 @@ Required env vars:
     BREEZE_SESSION_TOKEN  — Daily session token (regenerate each morning)
 
 Optional env vars (with sensible defaults):
-    DEFAULT_BROKERAGE     — Fixed brokerage per leg in INR (default: 40.0)
-    DEFAULT_STT_RATE      — STT rate as decimal (default: 0.001 = 0.1%)
-    DEFAULT_GST_RATE      — GST rate on brokerage (default: 0.18 = 18%)
-    QUOTAGUARDSTATIC_URL  — Proxy URL for static outbound IP (Phase 5, optional)
-    LOG_LEVEL             — Python logging level (default: INFO)
+    DEFAULT_BROKERAGE       — Fixed brokerage per leg in INR (default: 40.0)
+    DEFAULT_STT_RATE        — STT rate as decimal (default: 0.001 = 0.1%)
+    DEFAULT_GST_RATE        — GST rate on brokerage (default: 0.18 = 18%)
+    QUOTAGUARDSTATIC_URL    — Proxy URL for static outbound IP (Phase 5, optional)
+    LOG_LEVEL               — Python logging level (default: INFO)
+    HEALTH_CHECK_INTERVAL   — Seconds between real /health checks (default: 30, 0=always check)
 """
 
 from pydantic_settings import BaseSettings
@@ -53,6 +54,17 @@ class Settings(BaseSettings):
 
     # --- Logging ---
     LOG_LEVEL: str = Field(default="INFO", description="Python logging level")
+
+    # --- Health check caching ---
+    HEALTH_CHECK_INTERVAL: int = Field(
+        default=30,
+        description=(
+            "Seconds between real Breeze connectivity checks in /health. "
+            "Render's platform polls /health every few seconds; this cache prevents "
+            "is_connected() and its log line from firing on every single poll. "
+            "Set to 0 to disable caching (check on every call)."
+        ),
+    )
 
     model_config = {
         "env_file": ".env",
