@@ -316,6 +316,67 @@ class WatchlistRequest(BaseModel):
     )
 
 
+class CompareRequest(BaseModel):
+    """Request body for POST /compare — comparative analysis for 2–5 symbols."""
+
+    items: list[WatchlistItem] = Field(
+        min_length=2, max_length=5,
+        description="2–5 symbols to compare side-by-side.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Config — NSE Symbol Mapping
+# ---------------------------------------------------------------------------
+
+class UpsertNseSymbolRequest(BaseModel):
+    """Request body for POST /nse-symbols."""
+
+    fo_code: str = Field(description="F&O shortcode, e.g. RELIND.")
+    nse_ticker: str = Field(description="NSE equity ticker, e.g. RELIANCE.")
+
+
+class NseSymbolResponse(BaseModel):
+    """Response for a single NSE symbol mapping entry."""
+
+    fo_code: str
+    nse_ticker: str
+
+
+class NseSymbolTableResponse(BaseModel):
+    """Response for GET /nse-symbols."""
+
+    symbols: dict[str, str] = Field(description="F&O shortcode → NSE ticker mapping.")
+    count: int
+
+
+# ---------------------------------------------------------------------------
+# Config — Equity Metadata
+# ---------------------------------------------------------------------------
+
+class UpsertEquityMetaRequest(BaseModel):
+    """Request body for POST /equity-meta."""
+
+    symbol: str = Field(description="F&O shortcode, e.g. RELIND.")
+    sector: str = Field(description="Sector name, e.g. Technology.")
+    industry: str = Field(description="Industry name, e.g. Information Technology Services.")
+
+
+class EquityMetaResponse(BaseModel):
+    """Response for a single equity metadata entry."""
+
+    symbol: str
+    sector: str
+    industry: str
+
+
+class EquityMetaTableResponse(BaseModel):
+    """Response for GET /equity-meta."""
+
+    metadata: dict[str, dict] = Field(description="Symbol → {sector, industry} mapping.")
+    count: int
+
+
 class WatchlistResultItem(BaseModel):
     """Analysis outcome for one symbol in a watchlist run."""
 
