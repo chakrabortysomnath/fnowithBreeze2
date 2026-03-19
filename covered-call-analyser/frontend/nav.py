@@ -91,12 +91,12 @@ NAV_CSS = """
 def nav_bar(active: str) -> None:
     """Render the top navigation bar.
 
-    active: 'analyse' | 'watchlist' | 'config'
+    active: 'analyse' | 'compare' | 'config'
     """
     pages = [
-        ("🔍 Analyse",   "/",         "analyse"),
-        ("📋 Watchlist", "/watchlist", "watchlist"),
-        ("⚙️ Config",    "/config",    "config"),
+        ("🔍 Analyse", "/",        "analyse"),
+        ("⚖️ Compare", "/compare", "compare"),
+        ("⚙️ Config",  "/config",  "config"),
     ]
     links = "\n".join(
         f'<a class="nav-item{" active" if key == active else ""}" href="{href}" target="_self">{label}</a>'

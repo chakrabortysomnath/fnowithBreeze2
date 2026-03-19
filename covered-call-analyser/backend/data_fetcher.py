@@ -171,6 +171,49 @@ def upsert_lot_size(symbol: str, lot_size: int) -> None:
     logger.info(f"Lot size upserted: {symbol} = {lot_size}")
 
 
+def delete_lot_size(symbol: str) -> bool:
+    """Remove a symbol from the in-memory lot size table.
+
+    Returns:
+        True if the symbol existed and was removed, False if it was not found.
+    """
+    symbol = symbol.strip().upper()
+    if symbol in _LOT_SIZES:
+        del _LOT_SIZES[symbol]
+        logger.info(f"Lot size deleted: {symbol}")
+        return True
+    return False
+
+
+def upsert_nse_symbol(fo_code: str, nse_ticker: str) -> None:
+    """Add or update an F&O shortcode → NSE ticker mapping (in-memory).
+
+    Args:
+        fo_code:    F&O trading shortcode (will be uppercased).
+        nse_ticker: NSE equity ticker symbol.
+    """
+    fo_code = fo_code.strip().upper()
+    nse_ticker = nse_ticker.strip().upper()
+    if not fo_code or not nse_ticker:
+        raise ValueError("fo_code and nse_ticker must not be empty.")
+    _NSE_SYMBOLS[fo_code] = nse_ticker
+    logger.info(f"NSE symbol upserted: {fo_code} → {nse_ticker}")
+
+
+def delete_nse_symbol(fo_code: str) -> bool:
+    """Remove an F&O shortcode from the NSE symbol mapping (in-memory).
+
+    Returns:
+        True if found and deleted, False if not found.
+    """
+    fo_code = fo_code.strip().upper()
+    if fo_code in _NSE_SYMBOLS:
+        del _NSE_SYMBOLS[fo_code]
+        logger.info(f"NSE symbol deleted: {fo_code}")
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Phase 1 — Live equity quote
 # ---------------------------------------------------------------------------

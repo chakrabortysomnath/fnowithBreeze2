@@ -26,7 +26,11 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Query
+import json
+import os
+import pathlib
+
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from .breeze_client import get_session, is_connected, refresh_session
@@ -34,7 +38,8 @@ from .calculator import analyse_covered_call
 from .data_fetcher import (
     get_cmp, get_lot_size, get_available_expiries, get_option_chain,
     get_option_quote,
-    get_all_lot_sizes, get_all_nse_symbols, upsert_lot_size,
+    get_all_lot_sizes, get_all_nse_symbols, upsert_lot_size, delete_lot_size,
+    upsert_nse_symbol, delete_nse_symbol,
 )
 from .models import (
     HealthResponse, QuoteResponse,
@@ -44,7 +49,33 @@ from .models import (
     ChargesBreakdown, PayoffPoint,
     RefreshSessionRequest, RefreshSessionResponse,
     WatchlistRequest, WatchlistResponse, WatchlistResultItem,
+    CompareRequest,
+    UpsertNseSymbolRequest, NseSymbolResponse, NseSymbolTableResponse,
+    UpsertEquityMetaRequest, EquityMetaResponse, EquityMetaTableResponse,
 )
+
+# Path to the equity metadata JSON file (kept in frontend directory)
+_EQUITY_META_PATH = pathlib.Path(__file__).parent.parent / "frontend" / "equity_meta.json"
+
+
+def _load_equity_meta() -> dict:
+    """Load equity metadata from the JSON file."""
+    try:
+        with open(_EQUITY_META_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as exc:
+        logger_placeholder = logging.getLogger(__name__)
+        logger_placeholder.error(f"equity_meta.json parse error: {exc}")
+        return {}
+
+
+def _save_equity_meta(data: dict) -> None:
+    """Persist equity metadata back to the JSON file."""
+    with open(_EQUITY_META_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
 from .config import settings
 
 # ---------------------------------------------------------------------------
@@ -77,7 +108,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -493,6 +524,136 @@ def set_lot_size(req: UpsertLotSizeRequest) -> LotSizeResponse:
 
 
 # ---------------------------------------------------------------------------
+# Phase 4 Config Endpoints — DELETE lot size
+# ---------------------------------------------------------------------------
+
+@app.delete(
+    "/lot-sizes/{symbol}",
+    summary="Delete a symbol's lot size",
+    tags=["Configuration"],
+    status_code=204,
+)
+def delete_lot_size_endpoint(symbol: str) -> Response:
+    """Remove a symbol from the in-memory lot size table.
+
+    Raises:
+        404: Symbol not found in the lot size table.
+    """
+    found = delete_lot_size(symbol.strip().upper())
+    if not found:
+        raise HTTPException(status_code=404, detail=f"Symbol '{symbol}' not found in lot size table.")
+    logger.info(f"DELETE /lot-sizes/{symbol}")
+    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 Config Endpoints — NSE symbol mapping
+# ---------------------------------------------------------------------------
+
+@app.get(
+    "/nse-symbols",
+    response_model=NseSymbolTableResponse,
+    summary="List all F&O shortcode → NSE ticker mappings",
+    tags=["Configuration"],
+)
+def list_nse_symbols() -> NseSymbolTableResponse:
+    """Return the full F&O shortcode → NSE equity ticker mapping."""
+    symbols = get_all_nse_symbols()
+    return NseSymbolTableResponse(symbols=symbols, count=len(symbols))
+
+
+@app.post(
+    "/nse-symbols",
+    response_model=NseSymbolResponse,
+    summary="Add or update an F&O shortcode → NSE ticker mapping",
+    tags=["Configuration"],
+)
+def set_nse_symbol(req: UpsertNseSymbolRequest) -> NseSymbolResponse:
+    """Upsert an entry in the NSE symbol mapping (in-memory only)."""
+    try:
+        upsert_nse_symbol(req.fo_code, req.nse_ticker)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    fo_code = req.fo_code.strip().upper()
+    nse_ticker = req.nse_ticker.strip().upper()
+    logger.info(f"POST /nse-symbols — upserted {fo_code} → {nse_ticker}")
+    return NseSymbolResponse(fo_code=fo_code, nse_ticker=nse_ticker)
+
+
+@app.delete(
+    "/nse-symbols/{fo_code}",
+    summary="Delete an F&O shortcode → NSE ticker mapping",
+    tags=["Configuration"],
+    status_code=204,
+)
+def delete_nse_symbol_endpoint(fo_code: str) -> Response:
+    """Remove an entry from the NSE symbol mapping (in-memory only).
+
+    Raises:
+        404: fo_code not found in the mapping.
+    """
+    found = delete_nse_symbol(fo_code)
+    if not found:
+        raise HTTPException(status_code=404, detail=f"F&O code '{fo_code}' not found in NSE symbol mapping.")
+    logger.info(f"DELETE /nse-symbols/{fo_code}")
+    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 Config Endpoints — Equity metadata
+# ---------------------------------------------------------------------------
+
+@app.get(
+    "/equity-meta",
+    response_model=EquityMetaTableResponse,
+    summary="List all equity metadata (sector + industry)",
+    tags=["Configuration"],
+)
+def list_equity_meta() -> EquityMetaTableResponse:
+    """Return the full equity metadata mapping (symbol → {sector, industry})."""
+    data = _load_equity_meta()
+    return EquityMetaTableResponse(metadata=data, count=len(data))
+
+
+@app.post(
+    "/equity-meta",
+    response_model=EquityMetaResponse,
+    summary="Add or update equity metadata for a symbol",
+    tags=["Configuration"],
+)
+def set_equity_meta(req: UpsertEquityMetaRequest) -> EquityMetaResponse:
+    """Upsert sector/industry metadata for a symbol. Changes persist to equity_meta.json."""
+    symbol = req.symbol.strip().upper()
+    data = _load_equity_meta()
+    data[symbol] = {"sector": req.sector.strip(), "industry": req.industry.strip()}
+    _save_equity_meta(data)
+    logger.info(f"POST /equity-meta — upserted {symbol}: {req.sector} / {req.industry}")
+    return EquityMetaResponse(symbol=symbol, sector=req.sector.strip(), industry=req.industry.strip())
+
+
+@app.delete(
+    "/equity-meta/{symbol}",
+    summary="Delete equity metadata for a symbol",
+    tags=["Configuration"],
+    status_code=204,
+)
+def delete_equity_meta(symbol: str) -> Response:
+    """Remove a symbol's sector/industry metadata. Changes persist to equity_meta.json.
+
+    Raises:
+        404: Symbol not found in equity metadata.
+    """
+    data = _load_equity_meta()
+    symbol = symbol.strip().upper()
+    if symbol not in data:
+        raise HTTPException(status_code=404, detail=f"Symbol '{symbol}' not found in equity metadata.")
+    del data[symbol]
+    _save_equity_meta(data)
+    logger.info(f"DELETE /equity-meta/{symbol}")
+    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
 # Phase 3 Endpoints
 # ---------------------------------------------------------------------------
 
@@ -646,6 +807,73 @@ def analyse_watchlist(req: WatchlistRequest) -> WatchlistResponse:
             results.append(WatchlistResultItem(
                 symbol=symbol, status="error", error=str(exc),
             ))
+
+    succeeded = sum(1 for r in results if r.status == "ok")
+    return WatchlistResponse(
+        results=results,
+        total=len(results),
+        succeeded=succeeded,
+        failed=len(results) - succeeded,
+        timestamp=timestamp,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 Endpoints — Compare (up to 5 instruments)
+# ---------------------------------------------------------------------------
+
+@app.post(
+    "/compare",
+    response_model=WatchlistResponse,
+    summary="Run comparative covered call analysis for 2–5 symbols",
+    description=(
+        "Analyses 2–5 symbol+expiry combinations and returns results suitable for "
+        "side-by-side comparison. Uses the same analysis engine as /analyse-watchlist "
+        "but is capped at 5 instruments. A per-item failure does **not** abort the batch."
+    ),
+    tags=["Analysis"],
+)
+def compare(req: CompareRequest) -> WatchlistResponse:
+    """Comparative analysis for 2–5 symbols.
+
+    Reuses the same sequential analysis loop as /analyse-watchlist.
+
+    Raises:
+        422: Fewer than 2 or more than 5 items in the request.
+    """
+    from .calculator import _days_to_expiry as _dte
+
+    logger.info(f"POST /compare — {len(req.items)} items")
+    timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    results: list[WatchlistResultItem] = []
+
+    for item in req.items:
+        symbol = item.symbol.strip().upper()
+        try:
+            datetime.strptime(item.expiry_date, "%Y-%m-%d")
+            cmp       = get_cmp(symbol)
+            lot_size  = get_lot_size(symbol)
+            chain     = get_option_chain(symbol, item.expiry_date)
+            dte       = _dte(item.expiry_date)
+            raw = analyse_covered_call(
+                symbol=symbol,
+                cmp=cmp,
+                lot_size=lot_size,
+                expiry_date=item.expiry_date,
+                days_to_expiry=dte,
+                option_chain=chain,
+                already_holds=item.already_holds,
+                quantity_held=item.quantity_held,
+                avg_purchase_price=item.avg_purchase_price,
+                brokerage=item.brokerage,
+                stt_rate=item.stt_rate,
+                gst_rate=item.gst_rate,
+            )
+            analyse_resp = _build_analyse_response(raw, timestamp)
+            results.append(WatchlistResultItem(symbol=symbol, status="ok", result=analyse_resp))
+        except Exception as exc:
+            logger.warning(f"Compare item {symbol} failed: {exc}")
+            results.append(WatchlistResultItem(symbol=symbol, status="error", error=str(exc)))
 
     succeeded = sum(1 for r in results if r.status == "ok")
     return WatchlistResponse(
