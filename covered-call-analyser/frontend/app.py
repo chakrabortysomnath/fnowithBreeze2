@@ -1326,31 +1326,134 @@ if res:
         },
     }
 
-    for s in res["strikes"]:
-        stype     = s["strike_type"]
-        meta      = _STRIKE_META.get(stype, {"title": stype, "note": "", "bg": "rgba(255,255,255,0.04)", "border": "#444"})
-        _net_prem = s.get("net_premium_total") or 0
-        _net_cap  = _gross_capital - _net_prem
-        _loss_pct = (_net_cap / _gross_capital * 100) if _gross_capital else 0
-        _loss_sup = ((_cmp - _sup) * _lot - _net_prem) if _sup and _sup < _cmp else None
-        _note     = _rr_intel.get(stype)
+    # Volatility data for cushion warnings (prefer computed tech over Claude estimate)
+    _hv    = tech.get("hv_20_pct") or intel.get("hv_20_pct")
+    _atr   = tech.get("atr_14")    or intel.get("atr_14")
+    _days  = res.get("days_to_expiry") or 1
+    _msig  = (_hv / _math.sqrt(12)) if _hv else None   # expected 1-month ±1σ move %
 
+    def _warn_div(text: str, level: str) -> str:
+        """Coloured inline warning bar for use inside a card."""
+        _clr, _bg = {
+            "danger":  ("#F85149", "rgba(248,81,73,0.12)"),
+            "caution": ("#D29922", "rgba(210,153,34,0.12)"),
+            "ok":      ("#3FB950", "rgba(63,185,80,0.10)"),
+            "info":    ("#8B949E", "rgba(139,148,158,0.10)"),
+        }.get(level, ("#8B949E", "rgba(139,148,158,0.10)"))
+        return (
+            f'<div style="margin:4px 12px 4px 12px;padding:5px 10px;'
+            f'background:{_bg};border-left:2px solid {_clr};border-radius:3px;'
+            f'color:{_clr};font-size:12px;line-height:1.5;">{text}</div>'
+        )
+
+    for s in res["strikes"]:
+        stype = s["strike_type"]
+        meta  = _STRIKE_META.get(
+            stype, {"title": stype, "note": "", "bg": "rgba(255,255,255,0.04)", "border": "#444"}
+        )
+
+        # ── All metric calculations in Python ─────────────────────────────────
+        _net_prem   = s.get("net_premium_total") or 0
+        _max_prof   = s.get("max_profit_total")  or 0
+        _dp_pct     = s.get("downside_protection_pct") or 0   # (CMP-breakeven)/CMP %
+        _breakeven  = s.get("breakeven")
+        _oi         = s.get("open_interest")
+        _vol_traded = s.get("volume")
+        _note       = _rr_intel.get(stype)
+
+        # Build-Up Cost: cash actually deployed after premium offsets equity purchase
+        _build_cost = _gross_capital - _net_prem
+
+        # Premium Yield on Build Cost = return if option expires worthless
+        _yield_on_build     = (_net_prem / _build_cost * 100)     if _build_cost > 0 else 0
+        _ann_yield_on_build = (_yield_on_build * 365 / _days)     if _days > 0       else 0
+
+        # Total Return If Assigned = max P&L when stock is called away at strike
+        _total_ret_pct = (_max_prof / _build_cost * 100) if _build_cost > 0 else 0
+
+        # Loss to support
+        _loss_sup = ((_cmp - _sup) * _lot - _net_prem) if _sup and _sup < _cmp else None
+
+        # ── Volatility cushion assessment ─────────────────────────────────────
+        _vol_warn = _vol_lvl = None
+        if _msig is not None:
+            _ratio = _dp_pct / _msig if _msig > 0 else 0
+            if _ratio < 0.5:
+                _vol_lvl  = "danger"
+                _vol_warn = (
+                    f"⚠ Very thin cushion: {_dp_pct:.1f}% protection is less than half the "
+                    f"expected ±{_msig:.1f}% monthly move (HV {_hv:.0f}% p.a.). "
+                    "High loss risk even on moderate pullbacks."
+                )
+            elif _ratio < 1.0:
+                _vol_lvl  = "caution"
+                _vol_warn = (
+                    f"⚠ Thin cushion: {_dp_pct:.1f}% protection is below the "
+                    f"expected ±{_msig:.1f}% monthly 1σ move (HV {_hv:.0f}% p.a.)."
+                )
+            else:
+                _vol_lvl  = "ok"
+                _vol_warn = (
+                    f"✓ Cushion {_dp_pct:.1f}% covers the expected ±{_msig:.1f}% "
+                    f"monthly move (HV {_hv:.0f}% p.a.)."
+                )
+        elif _atr and _lot > 0:
+            _prem_share = _net_prem / _lot
+            _atr_cover  = _prem_share / _atr if _atr > 0 else 0
+            _vol_lvl    = "info"
+            _vol_warn   = (
+                f"ⓘ Premium covers ≈{_atr_cover:.1f}× the 14-day ATR "
+                f"(₹{_atr:.0f} typical daily range). No annualised HV available."
+            )
+
+        # ── Liquidity assessment ───────────────────────────────────────────────
+        _liq_warn = _liq_lvl = None
+        if _oi is not None or _vol_traded is not None:
+            _oi_v  = _oi          if _oi          is not None else 9_999
+            _vol_v = _vol_traded  if _vol_traded  is not None else 9_999
+            _parts = (
+                ([f"OI {_oi:,}"]        if _oi          is not None else []) +
+                ([f"Vol {_vol_traded:,}"] if _vol_traded is not None else [])
+            )
+            if _oi_v < 500 or _vol_v < 100:
+                _liq_lvl  = "danger"
+                _liq_warn = (
+                    f"⚠ Very illiquid ({', '.join(_parts)}) — "
+                    "wide bid-ask spreads likely. Use limit orders only."
+                )
+            elif _oi_v < 2_000 or _vol_v < 300:
+                _liq_lvl  = "caution"
+                _liq_warn = (
+                    f"⚠ Low liquidity ({', '.join(_parts)}) — "
+                    "verify live bid-ask before trading."
+                )
+
+        # ── kv rows ───────────────────────────────────────────────────────────
         kv_rows = [
-            ("Net premium",
-             "Net option premium received after all transaction charges",
+            ("Net premium received",
+             "Total net option premium received after all brokerage, STT, and other charges",
              _fmt_inr(_net_prem)),
-            ("Net capital at risk",
-             "Gross equity capital minus net premium; the effective amount at risk in the position",
-             f"₹{_net_cap:,.0f}  ({_loss_pct:.1f}% of gross)"),
+            ("Build-Up Cost",
+             "Cash actually deployed: lot × CMP minus net premium received. "
+             "This is the true capital at risk for a fresh covered call.",
+             _fmt_inr(_build_cost)),
+            ("Yield on build cost",
+             "Net premium ÷ build-up cost — your return if the option expires worthless. "
+             "Higher than standard premium yield because the denominator is net capital, not gross.",
+             f"{_yield_on_build:.2f}%  ({_ann_yield_on_build:.1f}% p.a.)"),
+            ("Total return if assigned",
+             "Best-case P&L if the stock is called away at the strike: "
+             "(strike − CMP) × lot + net premium. Expressed as % of build-up cost.",
+             f"{_fmt_inr(_max_prof)}  ({_total_ret_pct:.1f}% on build cost)"),
+            ("Downside cushion",
+             "How far the stock can fall from CMP before the position loses money: "
+             "(CMP − breakeven) ÷ CMP. Equals the premium as a % of spot.",
+             f"{_dp_pct:.2f}%  (breakeven {_fmt_inr(_breakeven)})"),
             ("Loss to support",
-             (
-                 f"Estimated P&L loss if stock falls to key support ₹{_sup:,.0f} — "
-                 "equity loss offset by premium collected"
-             ) if _sup else "Key support level not available",
+             (f"Net loss if stock falls to technical support ₹{_sup:,.0f}: "
+              "equity loss partially offset by premium already received")
+             if _sup else "Key support level unavailable",
              _fmt_inr(_loss_sup) if _loss_sup is not None else "—"),
-            ("Max profit",
-             "Maximum achievable profit if stock closes at or above the strike price at expiry",
-             _fmt_inr(s.get("max_profit_total"))),
         ]
         if _note:
             kv_rows.append((
@@ -1359,7 +1462,7 @@ if res:
                 _note,
             ))
 
-        # Build card HTML: coloured header + note + kv table
+        # ── Assemble card HTML ─────────────────────────────────────────────────
         cell = "padding:6px 12px;border-bottom:1px solid #30363D;vertical-align:middle;"
         rows_html = []
         for name, desc, value in kv_rows:
@@ -1376,6 +1479,12 @@ if res:
                 f'</tr>'
             )
 
+        warn_html = ""
+        if _vol_warn:
+            warn_html += _warn_div(_vol_warn, _vol_lvl)
+        if _liq_warn:
+            warn_html += _warn_div(_liq_warn, _liq_lvl)
+
         card_html = (
             f'<div style="background:{meta["bg"]};border-left:3px solid {meta["border"]};'
             f'border-radius:6px;margin-bottom:12px;overflow:hidden;">'
@@ -1387,6 +1496,7 @@ if res:
             f'font-family:Inter,\'Segoe UI\',sans-serif;">'
             f'{"".join(rows_html)}'
             f'</table>'
+            f'{warn_html}'
             f'</div>'
         )
         st.markdown(card_html, unsafe_allow_html=True)
