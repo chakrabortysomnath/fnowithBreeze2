@@ -10,9 +10,7 @@ Phase 2 functions:
     get_option_chain(symbol, expiry_date)  — Fetch call option chain for a given expiry
 """
 
-import json
 import logging
-import pathlib
 from calendar import monthrange
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -20,10 +18,6 @@ from typing import Optional
 from .breeze_client import get_session
 
 logger = logging.getLogger(__name__)
-
-# Paths to the JSON files shared with the frontend directory
-_LOT_SIZES_PATH = pathlib.Path(__file__).parent.parent / "frontend" / "lot_sizes.json"
-_NSE_SYMBOLS_PATH = pathlib.Path(__file__).parent.parent / "frontend" / "nse_symbols.json"
 
 
 # ---------------------------------------------------------------------------
@@ -144,61 +138,6 @@ _NSE_SYMBOLS: dict[str, str] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# JSON persistence helpers
-# ---------------------------------------------------------------------------
-
-def _load_lot_sizes() -> None:
-    """Overwrite in-memory _LOT_SIZES from JSON file if it exists."""
-    if _LOT_SIZES_PATH.exists():
-        try:
-            with open(_LOT_SIZES_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            _LOT_SIZES.clear()
-            _LOT_SIZES.update({k.strip().upper(): int(v) for k, v in data.items()})
-            logger.debug("Lot sizes loaded from %s (%d entries)", _LOT_SIZES_PATH, len(_LOT_SIZES))
-        except Exception as exc:
-            logger.error("Failed to load lot_sizes.json: %s — using hardcoded defaults", exc)
-
-
-def _save_lot_sizes() -> None:
-    """Write current in-memory _LOT_SIZES to JSON (sorted by key)."""
-    try:
-        with open(_LOT_SIZES_PATH, "w", encoding="utf-8") as f:
-            json.dump(dict(sorted(_LOT_SIZES.items())), f, indent=2, ensure_ascii=False)
-            f.write("\n")
-    except Exception as exc:
-        logger.error("Failed to save lot_sizes.json: %s", exc)
-
-
-def _load_nse_symbols() -> None:
-    """Overwrite in-memory _NSE_SYMBOLS from JSON file if it exists."""
-    if _NSE_SYMBOLS_PATH.exists():
-        try:
-            with open(_NSE_SYMBOLS_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            _NSE_SYMBOLS.clear()
-            _NSE_SYMBOLS.update({k.strip().upper(): v.strip().upper() for k, v in data.items()})
-            logger.debug("NSE symbols loaded from %s (%d entries)", _NSE_SYMBOLS_PATH, len(_NSE_SYMBOLS))
-        except Exception as exc:
-            logger.error("Failed to load nse_symbols.json: %s — using hardcoded defaults", exc)
-
-
-def _save_nse_symbols() -> None:
-    """Write current in-memory _NSE_SYMBOLS to JSON (sorted by key)."""
-    try:
-        with open(_NSE_SYMBOLS_PATH, "w", encoding="utf-8") as f:
-            json.dump(dict(sorted(_NSE_SYMBOLS.items())), f, indent=2, ensure_ascii=False)
-            f.write("\n")
-    except Exception as exc:
-        logger.error("Failed to save nse_symbols.json: %s", exc)
-
-
-# Load persisted data at import time — overrides hardcoded defaults when JSON files exist
-_load_lot_sizes()
-_load_nse_symbols()
-
-
 def get_all_nse_symbols() -> dict[str, str]:
     """Return the F&O shortcode → NSE equity ticker mapping."""
     return dict(_NSE_SYMBOLS)
@@ -213,7 +152,10 @@ def get_all_lot_sizes() -> dict[str, int]:
 
 
 def upsert_lot_size(symbol: str, lot_size: int) -> None:
-    """Add or update a symbol's lot size; change is persisted to lot_sizes.json.
+    """Add or update a symbol's lot size in the in-memory table.
+
+    Changes are in-memory only and are lost when the server restarts.
+    For persistence, update _LOT_SIZES in this source file and redeploy.
 
     Args:
         symbol:   NSE F&O symbol (will be uppercased).
@@ -226,12 +168,11 @@ def upsert_lot_size(symbol: str, lot_size: int) -> None:
     if lot_size <= 0:
         raise ValueError(f"lot_size must be a positive integer, got {lot_size}.")
     _LOT_SIZES[symbol] = lot_size
-    _save_lot_sizes()
     logger.info(f"Lot size upserted: {symbol} = {lot_size}")
 
 
 def delete_lot_size(symbol: str) -> bool:
-    """Remove a symbol from the lot size table and persist the change.
+    """Remove a symbol from the in-memory lot size table.
 
     Returns:
         True if the symbol existed and was removed, False if it was not found.
@@ -239,14 +180,13 @@ def delete_lot_size(symbol: str) -> bool:
     symbol = symbol.strip().upper()
     if symbol in _LOT_SIZES:
         del _LOT_SIZES[symbol]
-        _save_lot_sizes()
         logger.info(f"Lot size deleted: {symbol}")
         return True
     return False
 
 
 def upsert_nse_symbol(fo_code: str, nse_ticker: str) -> None:
-    """Add or update an F&O shortcode → NSE ticker mapping; persisted to nse_symbols.json.
+    """Add or update an F&O shortcode → NSE ticker mapping (in-memory).
 
     Args:
         fo_code:    F&O trading shortcode (will be uppercased).
@@ -257,12 +197,11 @@ def upsert_nse_symbol(fo_code: str, nse_ticker: str) -> None:
     if not fo_code or not nse_ticker:
         raise ValueError("fo_code and nse_ticker must not be empty.")
     _NSE_SYMBOLS[fo_code] = nse_ticker
-    _save_nse_symbols()
     logger.info(f"NSE symbol upserted: {fo_code} → {nse_ticker}")
 
 
 def delete_nse_symbol(fo_code: str) -> bool:
-    """Remove an F&O shortcode from the NSE symbol mapping; persisted to nse_symbols.json.
+    """Remove an F&O shortcode from the NSE symbol mapping (in-memory).
 
     Returns:
         True if found and deleted, False if not found.
@@ -270,7 +209,6 @@ def delete_nse_symbol(fo_code: str) -> bool:
     fo_code = fo_code.strip().upper()
     if fo_code in _NSE_SYMBOLS:
         del _NSE_SYMBOLS[fo_code]
-        _save_nse_symbols()
         logger.info(f"NSE symbol deleted: {fo_code}")
         return True
     return False
