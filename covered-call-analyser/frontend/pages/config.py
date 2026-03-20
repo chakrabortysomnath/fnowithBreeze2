@@ -1,19 +1,24 @@
 """
 pages/config.py — Master data configuration page for Breezy F&O.
 
-Provides review, edit, add, and delete capabilities for all three master
-data stores:
-  1. Lot Sizes  (in-memory; lost on backend restart)
-  2. NSE Symbol Mapping  (in-memory; lost on backend restart)
-  3. Equity Metadata  (persists to equity_meta.json)
+Provides review, edit, add, and delete capabilities for all master data:
+  1. Lot Sizes         — persisted to frontend/lot_sizes.json
+  2. NSE Symbol Mapping — persisted to frontend/nse_symbols.json
+  3. Equity Metadata   — persisted to frontend/equity_meta.json
+  4. Breeze Session    — daily session token refresh + logout
 """
 
+import json
 import os
+import sys
 
 import pandas as pd
 import requests
 import streamlit as st
 
+# Allow importing auth.py from the parent frontend/ directory
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from auth import check_auth
 from nav import NAV_CSS, nav_bar
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000").rstrip("/")
@@ -25,6 +30,8 @@ st.set_page_config(
     page_icon="⚙️",
     layout="centered",
 )
+
+check_auth()
 
 st.markdown(NAV_CSS, unsafe_allow_html=True)
 nav_bar("config")
@@ -40,7 +47,8 @@ st.markdown("""
   </span>
 </div>
 <p style="color:#8B949E; font-size:13px; margin-bottom:18px;">
-  Review, edit and add all instrument, lot, symbol and equity master data.
+  Manage all master data — lot sizes, symbol mappings, equity metadata and Breeze session.
+  All changes are persisted to JSON files and survive backend restarts.
 </p>
 """, unsafe_allow_html=True)
 
@@ -80,18 +88,33 @@ def _fetch_equity_meta() -> dict | None:
         return None
 
 
-# ── 3 Sub-tabs ────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=15)
+def _fetch_health() -> dict | None:
+    try:
+        r = requests.get(f"{BACKEND_URL}/health", timeout=5)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
 
-tab1, tab2, tab3 = st.tabs(["📊 Lot Sizes", "🔗 NSE Symbol Mapping", "🏷️ Equity Metadata"])
+
+# ── 4 Sub-tabs ────────────────────────────────────────────────────────────────
+
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📊 Lot Sizes",
+    "🔗 NSE Symbol Mapping",
+    "🏷️ Equity Metadata",
+    "🔑 Breeze Session",
+])
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — Lot Sizes
 # ═══════════════════════════════════════════════════════════════════════════════
 
 with tab1:
-    st.warning(
-        "**Note:** Changes are *in-memory only* and are lost when the backend restarts. "
-        "For permanent changes, update `_LOT_SIZES` in `backend/data_fetcher.py` and redeploy."
+    st.info(
+        "Changes are **persisted** to `lot_sizes.json` and survive backend restarts.",
+        icon="💾",
     )
 
     table = _fetch_lot_sizes()
@@ -115,6 +138,15 @@ with tab1:
         st.caption(
             f"Showing {len(filtered)} of {len(table)} symbols."
             + (" Try a different filter." if search and not filtered else "")
+        )
+
+        # Download current table as JSON
+        st.download_button(
+            label="⬇️ Export lot_sizes.json",
+            data=json.dumps(dict(sorted(table.items())), indent=2) + "\n",
+            file_name="lot_sizes.json",
+            mime="application/json",
+            use_container_width=True,
         )
     else:
         st.info("Backend unreachable — cannot load lot size table.")
@@ -200,9 +232,9 @@ with tab1:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 with tab2:
-    st.warning(
-        "**Note:** Changes are *in-memory only* and are lost when the backend restarts. "
-        "For permanent changes, update `_NSE_SYMBOLS` in `backend/data_fetcher.py` and redeploy."
+    st.info(
+        "Changes are **persisted** to `nse_symbols.json` and survive backend restarts.",
+        icon="💾",
     )
     st.caption(
         "This mapping translates F&O shortcodes (used by Breeze API) to NSE equity tickers "
@@ -237,6 +269,14 @@ with tab2:
         st.caption(
             f"Showing {len(filtered_nse)} of {len(nse_data)} mappings."
             + (" Try a different filter." if nse_search and not filtered_nse else "")
+        )
+
+        st.download_button(
+            label="⬇️ Export nse_symbols.json",
+            data=json.dumps(dict(sorted(nse_data.items())), indent=2) + "\n",
+            file_name="nse_symbols.json",
+            mime="application/json",
+            use_container_width=True,
         )
     else:
         st.info("Backend unreachable — cannot load NSE symbol mapping.")
@@ -322,9 +362,9 @@ with tab2:
 
 with tab3:
     st.info(
-        "**Changes here persist** — they are written to `equity_meta.json` and survive "
-        "backend restarts. This data provides sector/industry classification used by the "
-        "Analyse tab (reducing Claude API calls)."
+        "Changes are **persisted** to `equity_meta.json` and survive backend restarts. "
+        "This data provides sector/industry classification used by the Analyse tab.",
+        icon="💾",
     )
 
     eq_data = _fetch_equity_meta()
@@ -358,6 +398,14 @@ with tab3:
         st.caption(
             f"Showing {len(filtered_eq)} of {len(eq_data)} entries."
             + (" Try a different filter." if eq_search and not filtered_eq else "")
+        )
+
+        st.download_button(
+            label="⬇️ Export equity_meta.json",
+            data=json.dumps(dict(sorted(eq_data.items())), indent=2) + "\n",
+            file_name="equity_meta.json",
+            mime="application/json",
+            use_container_width=True,
         )
     else:
         st.info("Backend unreachable — cannot load equity metadata.")
@@ -442,3 +490,92 @@ with tab3:
         else:
             st.warning(f"**{eq_lookup}** not found in equity metadata.")
             st.caption("Use the form above to add it.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — Breeze Session
+# ═══════════════════════════════════════════════════════════════════════════════
+
+with tab4:
+    # ── Connection status banner ──
+    health = _fetch_health()
+    if health:
+        connected = health.get("breeze_connected", False)
+        if connected:
+            st.success("Breeze API is **connected** and responding.", icon="✅")
+        else:
+            st.warning("Backend is reachable but **Breeze is disconnected**. Refresh the token below.", icon="⚠️")
+    else:
+        st.error("Backend unreachable — cannot check Breeze connection status.", icon="🔴")
+
+    st.markdown("### Refresh Daily Session Token")
+    st.markdown(
+        "Breeze session tokens expire at midnight each day. Use this form to hot-swap "
+        "the token without restarting the backend service."
+    )
+
+    with st.expander("How to generate a fresh token"):
+        st.markdown("""
+1. Open in your browser (replace `YOUR_API_KEY` with your actual key):
+   `https://api.icicidirect.com/apiuser/login?api_key=YOUR_API_KEY`
+2. Log in with your ICICI Direct username, password and TOTP code.
+3. After login, the browser is redirected to a URL like:
+   `https://...?apisession=<TOKEN>&...`
+4. Copy the value after `apisession=` (stop at the next `&`) and paste it below.
+        """)
+
+    with st.form("session_refresh_form", clear_on_submit=True):
+        new_token = st.text_input(
+            "New Session Token",
+            type="password",
+            placeholder="Paste today's apisession token…",
+        )
+        do_refresh = st.form_submit_button("Refresh Session", use_container_width=True)
+
+    if do_refresh:
+        if not new_token.strip():
+            st.warning("Token cannot be empty.")
+        else:
+            with st.spinner("Connecting to Breeze with new token…"):
+                try:
+                    r = requests.post(
+                        f"{BACKEND_URL}/refresh-session",
+                        json={"session_token": new_token.strip()},
+                        timeout=20,
+                    )
+                    if r.status_code == 200:
+                        st.session_state.breeze_ok = True
+                        st.success(
+                            f"Session refreshed successfully at "
+                            f"{r.json().get('timestamp', 'unknown time')}. "
+                            "Breeze API is now connected."
+                        )
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        try:
+                            detail = r.json().get("detail", r.text)
+                        except Exception:
+                            detail = r.text
+                        st.error(
+                            f"**Failed to refresh session** (HTTP {r.status_code}).\n\n"
+                            f"{detail}"
+                        )
+                except requests.exceptions.ConnectionError:
+                    st.error("Cannot reach the backend. Check that the service is running.")
+                except requests.exceptions.Timeout:
+                    st.error("Backend timed out. The Breeze API may be slow — try again.")
+                except Exception as exc:
+                    st.error(f"Unexpected error: {exc}")
+
+    # ── Log out ──
+    st.divider()
+    st.subheader("Log Out")
+    st.caption(
+        "Clears the Breeze session from this browser tab. "
+        "You will be taken back to the login screen. "
+        "The backend session remains active."
+    )
+    if st.button("Log Out of This Session", use_container_width=True):
+        st.session_state.breeze_ok = False
+        st.rerun()

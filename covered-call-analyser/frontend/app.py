@@ -13,6 +13,7 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
+from auth import check_auth
 from nav import NAV_CSS, nav_bar
 
 # ── Static equity metadata (sector / industry lookup) ─────────────────────────
@@ -67,6 +68,8 @@ st.set_page_config(
     page_icon="🤏",
     layout="centered",
 )
+
+check_auth()
 
 st.markdown(NAV_CSS, unsafe_allow_html=True)
 nav_bar("analyse")
@@ -518,6 +521,357 @@ def _bs_iv(S: float, K: float, T_days: float, C: float, r: float = 0.065) -> flo
         else:
             hi = mid
     return round(((lo + hi) / 2.0) * 100, 1)
+
+
+def _bs_greeks(
+    S: float, K: float, T_days: float, sigma_pct: float,
+    ltp_per_share: float, r: float = 0.065,
+) -> dict | None:
+    """Black-Scholes Greeks for a European call option (per share).
+
+    Returns a dict with:
+      delta        — N(d1): call option delta (probability of expiring ITM)
+      gamma        — Γ: change in delta per ₹1 CMP move
+      theta_per_day — daily time decay in ₹/share from SELLER perspective (positive = favourable)
+      vega         — ₹ change per 1% decrease in IV (negative = seller loses if IV rises, shown as positive loss)
+      rho          — ₹ change per 1% increase in risk-free rate
+      implied_put  — theoretical put price from put-call parity: P = C + K·e^(−rT) − S
+      intrinsic    — max(S − K, 0) per share (call intrinsic value)
+      time_value   — LTP − intrinsic (time + volatility value component)
+    """
+    T = T_days / 365.0
+    sigma = sigma_pct / 100.0
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return None
+    try:
+        d1 = (_math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * _math.sqrt(T))
+        d2 = d1 - sigma * _math.sqrt(T)
+        N  = lambda x: 0.5 * (1.0 + _math.erf(x / _math.sqrt(2.0)))
+        Np = lambda x: _math.exp(-0.5 * x * x) / _math.sqrt(2.0 * _math.pi)
+        KerT = K * _math.exp(-r * T)
+
+        delta = N(d1)
+        gamma = Np(d1) / (S * sigma * _math.sqrt(T))
+        # Theta for long call per day (negative = cost for holder)
+        theta_long = -(S * Np(d1) * sigma / (2.0 * _math.sqrt(T)) + r * KerT * N(d2)) / 365.0
+        theta_seller = -theta_long          # seller gains from time decay (positive)
+        vega  = S * Np(d1) * _math.sqrt(T) / 100.0   # per 1% IV change
+        rho   = KerT * T * N(d2) / 100.0              # per 1% rate change
+
+        implied_put = max(ltp_per_share + KerT - S, 0.0)
+        intrinsic   = max(S - K, 0.0)
+        time_value  = ltp_per_share - intrinsic
+
+        return {
+            "delta":         round(delta,         4),
+            "gamma":         round(gamma,         6),
+            "theta_per_day": round(theta_seller,  4),
+            "vega":          round(vega,           4),
+            "rho":           round(rho,            4),
+            "implied_put":   round(implied_put,    2),
+            "intrinsic":     round(intrinsic,      2),
+            "time_value":    round(time_value,     2),
+        }
+    except Exception:
+        return None
+
+
+def _strike_options_table_html(
+    strikes: list[dict], cmp: float, greeks_data: dict, dte: int,
+) -> str:
+    """HTML for the Strike & Options Analysis table.
+
+    Rows = metrics (grouped by section), Columns = ITM / ATM / OTM+1 / OTM+2.
+    Each column header has a tooltip with the strike-type explanation.
+    """
+    TIPS = {
+        "ITM":   ("In The Money — strike below CMP. Highest premium, most downside protection, "
+                  "upside capped immediately. Best when expecting flat or mildly bearish price action."),
+        "ATM":   ("At The Money — strike nearest to CMP. Balanced premium vs upside participation. "
+                  "Maximum option time value. Best for a neutral-to-slightly-bullish outlook."),
+        "OTM+1": ("Out of The Money (+1 step) — one strike above CMP. Lower premium, lets you "
+                  "participate in modest stock upside before the call caps gains."),
+        "OTM+2": ("Out of The Money (+2 steps) — two strikes above CMP. Lowest premium, maximum "
+                  "upside participation in the covered call. Best when mildly bullish."),
+    }
+    CLR = {"ITM": "#6A8FBF", "ATM": "#58A6FF", "OTM+1": "#20A4A0", "OTM+2": "#39D0C8"}
+
+    s_map   = {s["strike_type"]: s for s in strikes}
+    types   = [t for t in ("ITM", "ATM", "OTM+1", "OTM+2") if t in s_map]
+    ncols   = len(types) + 1
+
+    hd = ("padding:8px 10px;border-bottom:2px solid #30363D;"
+          "color:#8B949E;font-size:11px;font-weight:600;white-space:nowrap;")
+    td = ("padding:6px 10px;border-bottom:1px solid #21262D;"
+          "color:#C9D1D9;font-size:12px;text-align:right;"
+          "font-family:'Courier New',monospace;white-space:nowrap;")
+    mtd = ("padding:6px 10px;border-bottom:1px solid #21262D;"
+           "color:#E6EDF3;font-size:12px;text-align:left;")
+    shd = ("padding:5px 10px;background:#161B22;"
+           "color:#58A6FF;font-size:11px;font-weight:700;letter-spacing:0.5px;")
+
+    def _v(stype: str, key: str, subkey: str | None = None):
+        s = s_map.get(stype)
+        if s is None:
+            return None
+        v = s.get(key)
+        if subkey is not None:
+            return v.get(subkey) if isinstance(v, dict) else None
+        return v
+
+    def _gv(stype: str, key: str):
+        g = greeks_data.get(stype)
+        return g.get(key) if g else None
+
+    def _fmt(v, fmt: str) -> str:
+        if v is None:
+            return "—"
+        try:
+            if fmt == "inr":       return f"₹{v:,.2f}"
+            if fmt == "inr0":      return f"₹{v:,.0f}"
+            if fmt == "pct1":      return f"{v:.1f}%"
+            if fmt == "pct2":      return f"{v:.2f}%"
+            if fmt == "spct1":     return f"{v:+.1f}%"
+            if fmt == "int":       return f"{v:,}"
+            if fmt == "f4":        return f"{v:.4f}"
+            if fmt == "f6":        return f"{v:.6f}"
+            return str(v)
+        except Exception:
+            return "—"
+
+    def sec(title: str) -> str:
+        return f'<tr><td colspan="{ncols}" style="{shd}">{title}</td></tr>'
+
+    def row(metric: str, tip: str, vals: dict, fmt: str) -> str:
+        tip_a = f' title="{tip}"' if tip else ""
+        icon  = (' <span style="color:#8B949E;font-size:10px;cursor:help;">ⓘ</span>'
+                 if tip else "")
+        r = f'<tr><td style="{mtd}"{tip_a}>{metric}{icon}</td>'
+        for t in types:
+            r += f'<td style="{td}">{_fmt(vals.get(t), fmt)}</td>'
+        return r + "</tr>"
+
+    out = [
+        '<div style="overflow-x:auto;">',
+        '<table style="width:100%;border-collapse:collapse;'
+        'font-family:Inter,\'Segoe UI\',sans-serif;">',
+        '<thead><tr>',
+        f'<th style="{hd} text-align:left;min-width:170px;">Metric</th>',
+    ]
+    for t in types:
+        s   = s_map[t]
+        clr = CLR.get(t, "#8B949E")
+        tip = TIPS.get(t, "")
+        out.append(
+            f'<th style="{hd} text-align:right;" title="{tip}">'
+            f'<span style="color:{clr};font-weight:700;">{t}</span><br>'
+            f'<span style="color:#E6EDF3;font-size:12px;">₹{s["strike"]:,.0f}</span>'
+            f'</th>'
+        )
+    out.append('</tr></thead><tbody>')
+
+    # ── STRIKES ──────────────────────────────────────────────────────────────
+    out.append(sec("── STRIKES ──"))
+    out.append(row("Moneyness %",
+                   "(Strike − CMP) / CMP × 100. Negative = ITM, positive = OTM.",
+                   {t: (_v(t, "strike") - cmp) / cmp * 100 for t in types}, "spct1"))
+    out.append(row("Intrinsic Value (₹/share)",
+                   "max(CMP − Strike, 0) — minimum value if expiry were today.",
+                   {t: max(cmp - _v(t, "strike"), 0.0) for t in types}, "inr"))
+    out.append(row("Time Value (₹/share)",
+                   "Premium LTP − Intrinsic Value. Value from time remaining and volatility.",
+                   {t: _gv(t, "time_value") for t in types}, "inr"))
+
+    # ── PREMIUM & INCOME ─────────────────────────────────────────────────────
+    out.append(sec("── PREMIUM & INCOME ──"))
+    out.append(row("Gross Premium LTP (₹/share)",
+                   "Option last traded price — gross premium per share before any charges.",
+                   {t: _v(t, "premium") for t in types}, "inr"))
+    out.append(row("Net Premium / Share (₹)",
+                   "Gross premium minus all charges, per share.",
+                   {t: _v(t, "net_premium_per_share") for t in types}, "inr"))
+    out.append(row("Net Premium Total (₹)",
+                   "Total net premium for the full lot after all charges.",
+                   {t: _v(t, "net_premium_total") for t in types}, "inr"))
+    out.append(row("Charges Total (₹)",
+                   "Total transaction costs: STT + Brokerage + GST.",
+                   {t: _v(t, "charges", "total") for t in types}, "inr"))
+    out.append(row("  ↳ STT (₹)",
+                   "Securities Transaction Tax on gross premium received (0.1%).",
+                   {t: _v(t, "charges", "stt") for t in types}, "inr"))
+    out.append(row("  ↳ Brokerage (₹)",
+                   "Fixed brokerage per lot written.",
+                   {t: _v(t, "charges", "brokerage") for t in types}, "inr"))
+    out.append(row("  ↳ GST (₹)",
+                   "Goods & Services Tax on brokerage (18%).",
+                   {t: _v(t, "charges", "gst") for t in types}, "inr"))
+    out.append(row("Charges %",
+                   "Total charges as percentage of gross premium — cost drag.",
+                   {t: (_v(t, "charges", "total") / _v(t, "gross_premium_total") * 100
+                        if _v(t, "gross_premium_total") else None)
+                    for t in types}, "pct1"))
+
+    # ── MARKET DATA ──────────────────────────────────────────────────────────
+    out.append(sec("── MARKET DATA ──"))
+    out.append(row("Implied Volatility %",
+                   "Market's expected future price movement. From Breeze live feed or "
+                   "computed via Black-Scholes inversion from the LTP.",
+                   {t: _v(t, "_iv_enriched") for t in types}, "pct1"))
+    out.append(row("Open Interest",
+                   "Total outstanding contracts at this strike — higher = more liquid.",
+                   {t: _v(t, "open_interest") for t in types}, "int"))
+    out.append(row("Volume",
+                   "Number of contracts traded today — use as secondary liquidity signal.",
+                   {t: _v(t, "volume") for t in types}, "int"))
+
+    # ── PERFORMANCE ──────────────────────────────────────────────────────────
+    out.append(sec("── PERFORMANCE ──"))
+    out.append(row("Breakeven (₹)",
+                   "Stock price at expiry where position P&L = 0: Cost Basis − Net Premium/Share.",
+                   {t: _v(t, "breakeven") for t in types}, "inr0"))
+    out.append(row("Downside Protection %",
+                   "How far stock can fall from CMP before a loss: (CMP − Breakeven) / CMP.",
+                   {t: _v(t, "downside_protection_pct") for t in types}, "pct2"))
+    out.append(row("Premium Yield %",
+                   "Net premium as % of total capital deployed (net_premium / total_cost).",
+                   {t: _v(t, "premium_yield_pct") for t in types}, "pct2"))
+    out.append(row("★ Annualised Yield %",
+                   "Premium yield scaled to 365 days. Compare against FD or debt-fund returns.",
+                   {t: _v(t, "annualised_yield_pct") for t in types}, "pct1"))
+    out.append(row("Max Profit Total (₹)",
+                   "Best-case P&L if stock is called away at strike: "
+                   "(Strike − Cost Basis + Net Premium/Share) × Shares.",
+                   {t: _v(t, "max_profit_total") for t in types}, "inr"))
+
+    # ── GREEKS ───────────────────────────────────────────────────────────────
+    out.append(sec("── GREEKS (Black-Scholes, r = 6.5%) ──"))
+    out.append(
+        f'<tr><td colspan="{ncols}" style="padding:3px 10px 5px;'
+        f'color:#8B949E;font-size:11px;font-style:italic;">'
+        f'Δ / Γ / Vega / ρ show call-option values. '
+        f'Θ is from the seller\'s perspective (positive = time decay is favourable). '
+        f'Vega shown as loss per +1% IV (seller is short vega).'
+        f'</td></tr>'
+    )
+    out.append(row("Δ Delta",
+                   "Call delta = N(d1): probability of expiring ITM and sensitivity to CMP. "
+                   "Net position delta = 1.0 (long stock) − Δ (short call).",
+                   {t: _gv(t, "delta") for t in types}, "f4"))
+    out.append(row("Γ Gamma",
+                   "Rate of change of delta per ₹1 move in CMP. "
+                   "High gamma near ATM means delta changes rapidly.",
+                   {t: _gv(t, "gamma") for t in types}, "f6"))
+    out.append(row("Θ Theta / day (₹/share, seller)",
+                   "Daily time decay benefit for the call seller — option loses this much value per calendar day.",
+                   {t: _gv(t, "theta_per_day") for t in types}, "inr"))
+    out.append(row("V Vega loss / +1% IV (₹/share)",
+                   "₹ loss per share per +1% rise in implied volatility. "
+                   "Short-call seller is short vega — rising IV increases the cost to close.",
+                   {t: _gv(t, "vega") for t in types}, "inr"))
+    out.append(row("ρ Rho / +1% rate (₹/share)",
+                   "₹ change per 1% increase in the risk-free rate. "
+                   "Positive for long call; minor effect for short-dated options.",
+                   {t: _gv(t, "rho") for t in types}, "inr"))
+
+    # ── PUT-CALL SUMMARY ────────────────────────────────────────────────────
+    out.append(sec("── PUT-CALL SUMMARY ──"))
+    out.append(
+        f'<tr><td colspan="{ncols}" style="padding:3px 10px 5px;'
+        f'color:#8B949E;font-size:11px;font-style:italic;">'
+        f'Theoretical put prices derived from Put-Call Parity (P = C + K·e^(−rT) − S). '
+        f'No put chain data fetched — use for quick cost comparison only.'
+        f'</td></tr>'
+    )
+    out.append(row("Implied Put Price (₹/share)",
+                   "Theoretical European put price from Put-Call Parity. "
+                   "Actual traded put may differ due to early-exercise premium (American options).",
+                   {t: _gv(t, "implied_put") for t in types}, "inr"))
+    out.append(row("Put Delta (approx.)",
+                   "Approximate put delta = Δ − 1 (from Put-Call parity). Negative for long put.",
+                   {t: ((_gv(t, "delta") or 0) - 1.0) if _gv(t, "delta") is not None else None
+                    for t in types}, "f4"))
+
+    out.append('</tbody></table></div>')
+    return "".join(out)
+
+
+def _common_rr_card_html(
+    pos: dict, res: dict, equity_data: dict, tech: dict,
+) -> str:
+    """HTML card for the common (non-strike-specific) Risk/Reward summary."""
+    cmp   = res["cmp"]
+    lot   = res["lot_size"]
+    dte   = res["days_to_expiry"]
+    sup   = equity_data.get("key_support")
+    res_  = equity_data.get("key_resistance")
+    hv    = tech.get("hv_20_pct") or equity_data.get("hv_20_pct")
+    mom   = equity_data.get("momentum_outlook")
+
+    trade_type = "Holdings (existing position)" if pos["already_holds"] else "Buy-Write (new position)"
+    gross_cap  = lot * cmp
+
+    data_rows = [
+        ("Trade Type",   trade_type),
+        ("Position",     f"{pos['lots']:,} lot × {lot:,} shares = {pos['shares']:,} shares"),
+        ("Gross Capital",_fmt_inr(gross_cap)),
+    ]
+    if hv:
+        monthly_sig = hv / _math.sqrt(12)
+        data_rows.append(("HV 20-Day (ann.)",      f"{hv:.1f}%"))
+        data_rows.append(("Expected ±1σ / month",  f"±{monthly_sig:.1f}%"))
+    if sup or res_:
+        data_rows.append(("Support / Resistance",  f"{_fmt_inr(sup)} / {_fmt_inr(res_)}"))
+    if mom:
+        icon = {"bullish": "▲", "neutral": "▶", "bearish": "▼"}.get(mom, "")
+        data_rows.append(("Momentum", f"{icon} {mom.capitalize()}"))
+
+    cell = "padding:5px 12px;border-bottom:1px solid #30363D;"
+    rows_html = "".join(
+        f'<tr>'
+        f'<td style="{cell} width:48%;color:#8B949E;font-size:12px;">{n}</td>'
+        f'<td style="{cell} width:52%;text-align:right;color:#E6EDF3;font-size:12px;'
+        f'font-family:\'Courier New\',monospace;">{v}</td>'
+        f'</tr>'
+        for n, v in data_rows
+    )
+
+    # Commentary
+    parts = [
+        f"{res['symbol']} at ₹{cmp:,.0f} with {dte} days to {res['expiry_date']} expiry.",
+    ]
+    if pos["already_holds"]:
+        parts.append(
+            f"Writing calls against {lot:,}-share holding "
+            f"(cost basis ₹{pos['cost_basis_per_share']:,.0f}/share)."
+        )
+    else:
+        parts.append(f"Fresh buy-write — ₹{gross_cap:,.0f} total equity capital for 1 lot.")
+    if hv:
+        msig = hv / _math.sqrt(12)
+        parts.append(f"HV {hv:.0f}% p.a. implies ±{msig:.1f}% expected monthly move.")
+    if sup and res_ and sup < cmp:
+        band = (res_ - sup) / cmp * 100 if cmp > 0 else 0
+        parts.append(f"Technical range ₹{sup:,.0f}–₹{res_:,.0f} ({band:.1f}% band).")
+    if mom:
+        parts.append(f"Short-term momentum: {mom}.")
+    parts.append("See per-strike cards below to compare risk/reward across ITM/ATM/OTM strikes.")
+
+    commentary = " ".join(parts)
+
+    return (
+        f'<div style="background:rgba(88,166,255,0.06);border-left:3px solid #58A6FF;'
+        f'border-radius:6px;margin-bottom:14px;overflow:hidden;">'
+        f'<div style="padding:10px 14px 6px;">'
+        f'<span style="color:#58A6FF;font-size:14px;font-weight:700;">'
+        f'Position Summary</span>'
+        f'</div>'
+        f'<table style="width:100%;border-collapse:collapse;">{rows_html}</table>'
+        f'<div style="padding:8px 14px 10px;background:rgba(88,166,255,0.03);'
+        f'border-top:1px solid #30363D;">'
+        f'<span style="color:#8B949E;font-size:12px;line-height:1.6;">{commentary}</span>'
+        f'</div>'
+        f'</div>'
+    )
 
 
 
@@ -992,19 +1346,15 @@ if res:
 
     st.subheader("Results")
 
-    # ── 30-Day Candlestick Chart ──────────────────────────────────────────────
-    st.markdown('<div class="section-hd">30-Day Price History</div>',
-                unsafe_allow_html=True)
-
+    # ── Common data fetches ───────────────────────────────────────────────────
     nse_map   = _fetch_nse_symbol_map()
     ticker    = _yf_ticker(res["symbol"], nse_map)
     nse_sym   = nse_map.get(res["symbol"].upper(), res["symbol"])
-    ohlc         = _fetch_ohlc(ticker)          # 1-year OHLC; chart uses last 22 rows
-    nifty_ohlc   = _fetch_nifty_ohlc()          # 1-year Nifty for beta
+    ohlc         = _fetch_ohlc(ticker)
+    nifty_ohlc   = _fetch_nifty_ohlc()
     intel        = _fetch_intel_claude(res["symbol"], nse_sym, res["cmp"], st.session_state.bypass_intel)
     tech         = _compute_technicals(ohlc, symbol=ticker, claude_estimates=intel)
     fundamentals = _compute_fundamentals(ohlc, nifty_ohlc, res["cmp"], symbol=ticker)
-    # Python-computed fields win; Claude analyst/dates fill gaps not in static JSON
     equity_data  = {**intel, **fundamentals}
 
     sector_hv = _compute_technicals(
@@ -1012,13 +1362,25 @@ if res:
         symbol=f"sector:{equity_data.get('sector') or 'unknown'}",
     ).get("hv_20_pct")
 
-    # All event dates from Claude intel (not computable from OHLC)
     earn_date = intel.get("earnings_date")
     ex_div    = intel.get("ex_dividend_date")
     agm_date  = intel.get("agm_date")
     board_dt  = intel.get("board_meeting_date")
 
-    # Slice last ~22 trading days (~1 month) for the candlestick chart
+    _intel_source = intel.get("_source", "blank")
+    _cmp  = res["cmp"]
+    _lot  = res["lot_size"]
+    _days = res.get("days_to_expiry") or 1
+    _sup  = equity_data.get("key_support")
+    _res  = equity_data.get("key_resistance")
+    _mom  = equity_data.get("momentum_outlook")
+    wk52_h = equity_data.get("fifty_two_week_high")
+    wk52_l = equity_data.get("fifty_two_week_low")
+
+    # ── 1. 30-Day Price History ───────────────────────────────────────────────
+    st.markdown('<div class="section-hd">30-Day Price History</div>',
+                unsafe_allow_html=True)
+
     ohlc_chart = ohlc.iloc[-22:] if ohlc is not None and len(ohlc) >= 22 else ohlc
 
     if ohlc_chart is not None and not ohlc_chart.empty:
@@ -1046,208 +1408,40 @@ if res:
     else:
         st.caption(f"Price history unavailable for {res['symbol']}.")
 
-    # ── Position Setup ────────────────────────────────────────────────────────
-    st.markdown('<div class="section-hd">Position Setup</div>', unsafe_allow_html=True)
+    # ── 2. Position Overview (merged: position basics + equity + market intel) ──
+    st.markdown('<div class="section-hd">Position Overview</div>', unsafe_allow_html=True)
 
-    trade_type     = "Holdings" if pos["already_holds"] else "Buy-Write"
-    approx_futures = res["cmp"] * (1 + 0.08 * res["days_to_expiry"] / 365)
-    last_qty       = st.session_state.get("last_qty_held", 0)
-    lot_size       = res["lot_size"]
-
-    if pos["already_holds"] and last_qty > 0:
-        net_capital = max(0, lot_size - last_qty) * res["cmp"]
-    else:
-        net_capital = pos["total_cost"]
-
-    ps_rows = [
-        ("Stock",                 "NSE F&O symbol",                                  res["symbol"]),
-        ("Current Market Price",  "Live last traded price",                          _fmt_inr(res["cmp"])),
-        ("F&O Lot Size",          "Shares per contract lot",                         f"{lot_size:,}"),
-        ("Trade Type",            "Buy-Write (new position) or Holdings (existing)", trade_type),
-        ("Cost Basis / Share",    "Purchase price per share used for analysis",      _fmt_inr(pos["cost_basis_per_share"])),
-        ("Purchase Cost (1 lot)", "Total capital at cost basis × lot size",          _fmt_inr(pos["total_cost"])),
-        ("Days to Expiry",        "Calendar days remaining to selected expiry",      str(res["days_to_expiry"])),
-        ("Approx. Futures Price", "CMP × (1 + 8% × DTE / 365) at 8% carry",         _fmt_inr(approx_futures)),
-        ("Net Capital Required",  "Additional cash needed to complete the lot",      _fmt_inr(net_capital)),
-    ]
-    st.markdown(_kv_table_html(ps_rows), unsafe_allow_html=True)
-
-    if pos["already_holds"] and last_qty > 0:
-        st.caption(
-            f"You hold {last_qty:,} of {lot_size:,} shares — "
-            f"need {max(0, lot_size - last_qty):,} more at CMP to complete the lot."
-        )
-
-    # ── Equity Data ───────────────────────────────────────────────────────────
-    st.markdown('<div class="section-hd">Equity Data</div>', unsafe_allow_html=True)
-
-    _intel_source = intel.get("_source", "blank")
+    # Claude API source indicator
     if _intel_source == "blank":
         _api_key_set = bool(os.environ.get("ANTHROPIC_API_KEY"))
         if not _api_key_set:
             st.checkbox(
                 "⚠️ Claude AI data unavailable — API key not configured",
-                value=False,
-                disabled=True,
-                help=(
-                    "Set `ANTHROPIC_API_KEY` in the Render dashboard "
-                    "(Environment → Add Env Var) and redeploy, "
-                    "or enable **Bypass Claude AI** above to use mock data."
-                ),
+                value=False, disabled=True,
+                help=("Set `ANTHROPIC_API_KEY` in the Render dashboard "
+                      "(Environment → Add Env Var) and redeploy, "
+                      "or enable **Bypass Claude AI** above to use mock data."),
                 key="err_no_key_indicator",
             )
         else:
             st.checkbox(
                 "⚠️ Claude AI data unavailable — API error, retries exhausted",
-                value=False,
-                disabled=True,
-                help=(
-                    "The API returned an error (possibly overloaded or rate-limited). "
-                    "Re-run the analysis in a moment, "
-                    "or enable **Bypass Claude AI** above to use mock data."
-                ),
+                value=False, disabled=True,
+                help=("The API returned an error (possibly overloaded or rate-limited). "
+                      "Re-run the analysis in a moment, "
+                      "or enable **Bypass Claude AI** above to use mock data."),
                 key="err_api_error_indicator",
             )
     elif _intel_source == "mock":
         st.checkbox(
             "🔶 Bypass mode active — mock data only, not real market data",
-            value=True,
-            disabled=True,
-            help=(
-                "Values are price-consistent placeholders derived from CMP. "
-                "Use the **Bypass Claude AI** toggle above to switch back to live data."
-            ),
+            value=True, disabled=True,
+            help=("Values are price-consistent placeholders derived from CMP. "
+                  "Use the **Bypass Claude AI** toggle above to switch back to live data."),
             key="mock_mode_indicator",
         )
 
-    wk52_h = equity_data.get("fifty_two_week_high")
-    wk52_l = equity_data.get("fifty_two_week_low")
-
-    ed_rows = [
-        ("52-Week High",     "Highest closing price over the last 52 weeks (computed from 1-year OHLC)",   _fmt_inr(wk52_h)),
-        ("52-Week Low",      "Lowest closing price over the last 52 weeks (computed from 1-year OHLC)",    _fmt_inr(wk52_l)),
-        ("Beta",             "Price sensitivity relative to Nifty 50 (computed from 1-year log-returns)",  f"{equity_data['beta']:.2f}" if equity_data.get("beta") else "—"),
-        ("Sector",           "Equity sector classification",                                               equity_data.get("sector")   or "—"),
-        ("Industry",         "Equity industry classification",                                             equity_data.get("industry") or "—"),
-        ("Sector HV 20-Day", "Annualised 20-day HV of the matching Nifty sector index",
-         f"{sector_hv:.1f}%" if sector_hv else "—"),
-    ]
-    st.markdown(_kv_table_html(ed_rows), unsafe_allow_html=True)
-    if _intel_source == "claude_api":
-        _in  = intel.get("_input_tokens", 0)
-        _out = intel.get("_output_tokens", 0)
-        _usd = intel.get("_cost_usd", 0.0)
-        st.caption(
-            f"⚡ Analyst targets & dates from Claude AI (claude-haiku-4-5) · "
-            f"{_in:,} in + {_out:,} out tokens · "
-            f"~${_usd:.4f} this call · cached 24 h · "
-            f"fundamentals computed from yfinance OHLC · verify before trading."
-        )
-    elif _intel_source == "mock":
-        st.caption("🔶 Mock data (bypass mode) — not real market data.")
-
-    # ── Options API Data ──────────────────────────────────────────────────────
-    st.markdown('<div class="section-hd">Options API Data</div>', unsafe_allow_html=True)
-
-    # Strike selector — default to ATM
-    strike_labels = [
-        f"{s['strike_type']}  —  ₹{s['strike']:,.0f}"
-        for s in res["strikes"]
-    ]
-    atm_default = next(
-        (i for i, s in enumerate(res["strikes"]) if s["strike_type"] == "ATM"), 0
-    )
-    selected_label = st.selectbox(
-        "Select strike to view options data",
-        options=strike_labels,
-        index=atm_default,
-        key="opt_api_strike_sel",
-        label_visibility="collapsed",
-    )
-    sel_idx = strike_labels.index(selected_label)
-    sel_s   = res["strikes"][sel_idx]
-
-    # Fetch live option data for the selected strike using specific strike_price
-    # (strike_price=0 on the full chain doesn't return IV/OI/Volume from Breeze)
-    opt_q = _fetch_option_quote(res["symbol"], res["expiry_date"], sel_s["strike"])
-
-    # Fall back to chain data when the specific quote returns None
-    iv_val  = opt_q.get("iv")            if opt_q.get("iv")            is not None else sel_s.get("iv")
-    oi_val  = opt_q.get("open_interest") if opt_q.get("open_interest") is not None else sel_s.get("open_interest")
-    vol_val = opt_q.get("volume")        if opt_q.get("volume")        is not None else sel_s.get("volume")
-    ltp_val = opt_q.get("ltp")           if opt_q.get("ltp")           else           sel_s.get("premium")
-
-    # If Breeze doesn't return IV, compute it from Black-Scholes using the LTP
-    _iv_computed = False
-    if iv_val is None and ltp_val and res.get("days_to_expiry"):
-        iv_val = _bs_iv(
-            S=res["cmp"],
-            K=sel_s["strike"],
-            T_days=res["days_to_expiry"],
-            C=ltp_val,
-        )
-        if iv_val is not None:
-            _iv_computed = True
-
-    gross       = sel_s.get("gross_premium_total") or 0
-    moneyness   = (sel_s["strike"] - res["cmp"]) / res["cmp"] * 100
-    charges_pct = (sel_s["charges"]["total"] / gross * 100) if gross > 0 else 0
-
-    _iv_label = "IV % (calc)" if _iv_computed else "IV %"
-    _iv_desc  = (
-        "Implied Volatility derived from Black-Scholes (Breeze did not return live IV)"
-        if _iv_computed else
-        "Implied Volatility — the market's expectation of future price movement for this strike"
-    )
-    opt_rows = [
-        (_iv_label,
-         _iv_desc,
-         f"{iv_val:.1f}%" if iv_val is not None else "—"),
-        ("Open Interest",
-         "Total outstanding contracts at this strike — proxy for liquidity",
-         f"{oi_val:,}" if oi_val is not None else "—"),
-        ("Volume",
-         "Number of contracts traded today at this strike",
-         f"{vol_val:,}" if vol_val is not None else "—"),
-        ("LTP (premium)",
-         "Last traded price of this call option (cross-check against analyse result)",
-         _fmt_inr(ltp_val)),
-        ("Moneyness %",
-         "Strike distance from CMP — negative means ITM, positive means OTM",
-         f"{moneyness:+.1f}%"),
-        ("Charges %",
-         "Total transaction costs as a percentage of gross premium",
-         f"{charges_pct:.1f}%"),
-    ]
-    st.markdown(_kv_table_html(opt_rows), unsafe_allow_html=True)
-
-    # Equity-level reference metrics that contextualise the option data
-    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-
-    if wk52_h and wk52_l and wk52_h > wk52_l:
-        pct_range = (res["cmp"] - wk52_l) / (wk52_h - wk52_l) * 100
-        filled    = round(pct_range / 10)
-        wk52_pos  = f"{'█' * filled}{'░' * (10 - filled)}  {pct_range:.0f}% of 52w range"
-    else:
-        wk52_pos  = "—"
-
-    ref_rows = [
-        ("52-Week Position",
-         "CMP within the 52-week high–low band (0% = 52w low, 100% = 52w high)",
-         wk52_pos),
-        ("HV 20-Day",
-         "Annualised 20-day historical volatility of the equity",
-         f"{tech['hv_20_pct']:.1f}%" if tech.get("hv_20_pct") else "—"),
-        ("ATR 14-Day",
-         "Average True Range over the last 14 sessions — daily price noise in ₹",
-         _fmt_inr(tech.get("atr_14"))),
-    ]
-    st.markdown(_kv_table_html(ref_rows), unsafe_allow_html=True)
-
-    # ── Market Intelligence ───────────────────────────────────────────────────
-    st.markdown('<div class="section-hd">Market Intelligence</div>', unsafe_allow_html=True)
-
-    # Earnings warning banner
+    # Earnings/ex-div event warnings (shown before the table for visibility)
     if earn_date:
         try:
             earn_dt = datetime.datetime.strptime(earn_date, "%d %b %Y").date()
@@ -1259,8 +1453,6 @@ if res:
                 )
         except Exception:
             pass
-
-    # Ex-dividend warning
     if ex_div:
         try:
             exd_dt = datetime.datetime.strptime(ex_div, "%d %b %Y").date()
@@ -1282,133 +1474,163 @@ if res:
         if not any([lo, mn, hi]):
             return "—"
         return "  |  ".join(filter(None, [
-            f"Low {_fmt_inr(lo)}"     if lo else None,
-            f"Target {_fmt_inr(mn)}"  if mn else None,
-            f"High {_fmt_inr(hi)}"    if hi else None,
+            f"Low {_fmt_inr(lo)}"    if lo else None,
+            f"Target {_fmt_inr(mn)}" if mn else None,
+            f"High {_fmt_inr(hi)}"   if hi else None,
         ]))
 
-    mi_rows = [
-        ("Earnings Date",    "Next quarterly / annual results announcement",           earn_date or "—"),
-        ("Ex-Dividend Date", "Shares go ex-div (early assignment risk for ITM calls)", ex_div    or "—"),
-        ("Board Meeting",    "Next board meeting date",                                board_dt  or "—"),
-        ("AGM",              "Annual General Meeting date",                            agm_date  or "—"),
-        ("Analyst Targets",  f"Consensus price targets from {n_analysts} analysts",   _fmt_targets()),
-        ("Recommendation",   "Analyst consensus rating",
-         (intel.get("analyst_recommendation") or "—").upper()),
+    if wk52_h and wk52_l and wk52_h > wk52_l:
+        pct_range = (res["cmp"] - wk52_l) / (wk52_h - wk52_l) * 100
+        filled    = round(pct_range / 10)
+        wk52_pos  = f"{'█' * filled}{'░' * (10 - filled)}  {pct_range:.0f}% of 52w range"
+    else:
+        wk52_pos  = "—"
+
+    trade_type = "Holdings" if pos["already_holds"] else "Buy-Write"
+    overview_rows = [
+        ("Stock",            "NSE F&O symbol", res["symbol"]),
+        ("Current Price",    "Live last traded price (LTP) in ₹", _fmt_inr(res["cmp"])),
+        ("Trade Type",       "Buy-Write = new position; Holdings = writing against existing shares", trade_type),
+        ("Expiry",           "Selected option expiry date", res["expiry_date"]),
+        ("Days to Expiry",   "Calendar days remaining to selected expiry", str(res["days_to_expiry"])),
+        ("Sector / Industry","Equity sector and industry classification",
+         f"{equity_data.get('sector') or '—'} / {equity_data.get('industry') or '—'}"),
+        ("52-Week High/Low", "52-week high and low closing prices (from 1-year OHLC)",
+         f"{_fmt_inr(wk52_h)} / {_fmt_inr(wk52_l)}"),
+        ("52-Week Position", "CMP within the 52-week high–low band (0%=52w low, 100%=52w high)", wk52_pos),
+        ("Beta",             "Price sensitivity relative to Nifty 50 (from 1-year log-returns)",
+         f"{equity_data['beta']:.2f}" if equity_data.get("beta") else "—"),
+        ("HV 20-Day",        "Annualised 20-day historical volatility of the equity",
+         f"{tech['hv_20_pct']:.1f}%" if tech.get("hv_20_pct") else "—"),
+        ("ATR 14-Day",       "Average True Range over last 14 sessions — daily price noise",
+         _fmt_inr(tech.get("atr_14"))),
+        ("Sector HV 20-Day", "Annualised 20-day HV of the matching Nifty sector index",
+         f"{sector_hv:.1f}%" if sector_hv else "—"),
     ]
-    # Note: intel used directly here — analyst data and dates are the only fields from Claude
-    st.markdown(_kv_table_html(mi_rows), unsafe_allow_html=True)
+    if intel.get("analyst_target_low") or intel.get("analyst_target_mean") or intel.get("analyst_target_high"):
+        overview_rows.append(
+            ("Analyst Targets", f"Consensus price targets from {n_analysts} analysts", _fmt_targets())
+        )
+    if intel.get("analyst_recommendation"):
+        overview_rows.append(
+            ("Recommendation", "Analyst consensus rating", (intel.get("analyst_recommendation") or "—").upper())
+        )
+    for label, tip, val in [
+        ("Earnings Date",    "Next quarterly / annual results announcement", earn_date),
+        ("Ex-Dividend Date", "Shares go ex-div — early assignment risk for ITM calls", ex_div),
+        ("Board Meeting",    "Next scheduled board meeting", board_dt),
+        ("AGM",              "Annual General Meeting date", agm_date),
+    ]:
+        if val:
+            overview_rows.append((label, tip, val))
+
+    st.markdown(_kv_table_html(overview_rows), unsafe_allow_html=True)
     if _intel_source == "claude_api":
+        _in  = intel.get("_input_tokens", 0)
+        _out = intel.get("_output_tokens", 0)
+        _usd = intel.get("_cost_usd", 0.0)
         st.caption(
-            "⚡ Market intelligence estimated by Claude AI — "
-            "verify corporate events before trading."
+            f"⚡ Analyst targets & corporate dates from Claude AI (claude-haiku-4-5) · "
+            f"{_in:,} in + {_out:,} out tokens · ~${_usd:.4f} · cached 24 h · "
+            f"fundamentals & technicals computed from yfinance OHLC · verify before trading."
         )
     elif _intel_source == "mock":
         st.caption("🔶 Mock data (bypass mode) — not real market data.")
 
-    # ── Strike Analysis ───────────────────────────────────────────────────────
-    st.markdown('<div class="section-hd">Strike Analysis</div>', unsafe_allow_html=True)
+    # ── 3. Position Build Cost ────────────────────────────────────────────────
+    st.markdown('<div class="section-hd">Position Build Cost</div>', unsafe_allow_html=True)
 
-    rows = []
-    for s in res["strikes"]:
-        rows.append({
-            "Type":           s["strike_type"],
-            "Strike (₹)":     f"₹{s['strike']:,.0f}",
-            "Premium (₹)":    f"₹{s['premium']:,.2f}",
-            "Net premium":    _fmt_inr(s["net_premium_total"]),
-            "Breakeven":      _fmt_inr(s["breakeven"]),
-            "Max profit":     _fmt_inr(s["max_profit_total"]),
-            "Yield %":        f"{s['premium_yield_pct']:.2f}%",
-            "Ann. yield %":   (f"{s['annualised_yield_pct']:.1f}%"
-                               if s["annualised_yield_pct"] is not None else "—"),
-            "Downside prot.": f"{s['downside_protection_pct']:.2f}%",
-        })
-    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, height=185)
+    lot_size       = res["lot_size"]
+    approx_futures = res["cmp"] * (1 + 0.08 * res["days_to_expiry"] / 365)
+    last_qty       = st.session_state.get("last_qty_held", 0)
+    gross_capital  = lot_size * res["cmp"]
 
-    # ── P&L payoff chart ──────────────────────────────────────────────────────
-    st.markdown('<div class="section-hd">P&L Payoff</div>', unsafe_allow_html=True)
-
-    strikes      = res["strikes"]
-    strike_types = [s["strike_type"] for s in strikes]
-    payoff_opts  = ["All strikes"] + strike_types
-    selected     = st.radio("View payoff for", payoff_opts, horizontal=True, key="payoff_strike_sel")
-
-    line_fig = go.Figure()
-    for s in strikes:
-        if selected != "All strikes" and s["strike_type"] != selected:
-            continue
-        payoff = s["payoff"]
-        xs = [p["price"] for p in payoff]
-        ys = [p["pl"]    for p in payoff]
-        line_fig.add_trace(go.Scatter(
-            name=f"{s['strike_type']} ₹{s['strike']:,.0f}",
-            x=xs, y=ys,
-            mode="lines+markers",
-            line=dict(color=STRIKE_COLORS.get(s["strike_type"], "#20A4A0"), width=2),
-            marker=dict(size=5),
-        ))
-
-    line_fig.add_vline(
-        x=res["cmp"], line_width=1, line_dash="dash", line_color="#8B949E",
-        annotation_text=f"CMP ₹{res['cmp']:,.0f}",
-        annotation_position="top right",
-        annotation_font_size=11, annotation_font_color="#8B949E",
-    )
-    line_fig.add_hline(y=0, line_width=1, line_dash="dot", line_color="#8B949E")
-    line_fig.update_layout(
-        **_base_layout(height=260),
-        title=dict(text="P&L at expiry", font=dict(size=14)),
-        xaxis=dict(title="Stock price at expiry (₹)", showgrid=False, zeroline=False,
-                   gridcolor=GRID_COLOR),
-        yaxis=dict(title="P&L (₹)", showgrid=True, gridcolor=GRID_COLOR, zeroline=False),
-    )
-    st.plotly_chart(line_fig, width="stretch", config={"displayModeBar": False})
-
-    # ── Risk / Reward Summary ─────────────────────────────────────────────────
-    st.markdown('<div class="section-hd">Risk / Reward Summary</div>', unsafe_allow_html=True)
-
-    _sup  = equity_data.get("key_support")    # computed from 20-day rolling low
-    _res  = equity_data.get("key_resistance") # computed from 20-day rolling high
-    _mom  = equity_data.get("momentum_outlook")  # CMP vs 20-SMA
-    _lot  = res["lot_size"]
-    _cmp  = res["cmp"]
-
-    # ── Position build-up / capital at risk ───────────────────────────────────
-    _trade_type    = "Holdings" if pos.get("already_holds") else "Buy-Write"
-    _gross_capital = _lot * _cmp
-    # rr_* commentary is now generated in Python per strike — no Claude field needed
+    if pos["already_holds"] and last_qty > 0:
+        net_capital = max(0, lot_size - last_qty) * res["cmp"]
+    else:
+        net_capital = pos["total_cost"]
 
     build_rows = [
-        ("Position type",
-         "Whether shares are already held (Holdings) or bought together with the call (Buy-Write)",
-         _trade_type),
-        ("Lot size",
-         "Number of shares per F&O contract",
-         f"{_lot:,} shares"),
-        ("Gross equity capital",
-         "Total cost to own one lot at CMP (lot size × CMP) — before premium income",
-         _fmt_inr(_gross_capital)),
+        ("F&O Lot Size",          "Shares per F&O contract lot",                          f"{lot_size:,}"),
+        ("Cost Basis / Share",    "Purchase price per share used for this analysis",       _fmt_inr(pos["cost_basis_per_share"])),
+        ("Purchase Cost (1 lot)", "Total capital at cost basis × lot size",                _fmt_inr(pos["total_cost"])),
+        ("Gross Equity Capital",  "Lot size × CMP — capital to own one lot at market",    _fmt_inr(gross_capital)),
+        ("Net Capital Required",  "Additional cash needed to complete the lot",            _fmt_inr(net_capital)),
+        ("Approx. Futures Price", "CMP × (1 + 8% × DTE/365) — approximate fair futures", _fmt_inr(approx_futures)),
     ]
     if _sup:
         build_rows.append((
-            "Downside to support",
-            f"Unrealised equity loss if stock falls from CMP to key support ₹{_sup:,.0f}",
+            "Downside to Support (₹)",
+            f"Unrealised equity loss if stock falls to key support ₹{_sup:,.0f}: (CMP − support) × lot",
             _fmt_inr((_cmp - _sup) * _lot),
         ))
     if _sup or _res:
         build_rows.append((
             "Support / Resistance",
-            "Nearest technical levels that bound the expected price range for the trade",
+            "Nearest technical levels computed from 20-day rolling low/high of close prices",
             f"{_fmt_inr(_sup)} / {_fmt_inr(_res)}",
         ))
     if _mom:
         _mom_icon = {"bullish": "▲", "neutral": "▶", "bearish": "▼"}.get(_mom, "")
         build_rows.append((
             "Momentum (1 month)",
-            "Short-term price momentum outlook from Claude AI",
+            "Short-term momentum: CMP vs 20-day SMA (>+1% bullish, <-1% bearish, ±1% neutral)",
             f"{_mom_icon} {_mom.capitalize()}",
         ))
     st.markdown(_kv_table_html(build_rows), unsafe_allow_html=True)
+    if pos["already_holds"] and last_qty > 0:
+        st.caption(
+            f"You hold {last_qty:,} of {lot_size:,} shares — "
+            f"need {max(0, lot_size - last_qty):,} more at CMP to complete the lot."
+        )
+
+    # ── 4. Strike & Options Analysis (transposed table with Greeks) ───────────
+    st.markdown('<div class="section-hd">Strike &amp; Options Analysis</div>',
+                unsafe_allow_html=True)
+
+    # Enrich all strikes with live IV (Breeze quote → BS fallback)
+    enriched_strikes: list[dict] = []
+    for s in res["strikes"]:
+        sc = dict(s)
+        iv_e = s.get("iv")
+        ltp  = s.get("premium")
+        if iv_e is None and ltp and res.get("days_to_expiry"):
+            q = _fetch_option_quote(res["symbol"], res["expiry_date"], s["strike"])
+            iv_e = q.get("iv")
+            if q.get("open_interest") is not None:
+                sc["open_interest"] = q["open_interest"]
+            if q.get("volume") is not None:
+                sc["volume"] = q["volume"]
+            if iv_e is None:
+                iv_e = _bs_iv(res["cmp"], s["strike"], res["days_to_expiry"], ltp)
+        sc["_iv_enriched"] = iv_e
+        enriched_strikes.append(sc)
+
+    # Compute Black-Scholes Greeks for every enriched strike
+    greeks_data: dict[str, dict | None] = {}
+    for s in enriched_strikes:
+        iv_val = s.get("_iv_enriched")
+        if iv_val is not None and res.get("days_to_expiry"):
+            greeks_data[s["strike_type"]] = _bs_greeks(
+                S=res["cmp"], K=s["strike"],
+                T_days=res["days_to_expiry"], sigma_pct=iv_val,
+                ltp_per_share=s["premium"],
+            )
+        else:
+            greeks_data[s["strike_type"]] = None
+
+    st.markdown(
+        _strike_options_table_html(enriched_strikes, res["cmp"], greeks_data, res["days_to_expiry"]),
+        unsafe_allow_html=True,
+    )
+
+    # ── 5. Risk / Reward Summary ──────────────────────────────────────────────
+    st.markdown('<div class="section-hd">Risk / Reward Summary</div>', unsafe_allow_html=True)
+
+    # 5a: Common position card with Python-generated commentary
+    st.markdown(_common_rr_card_html(pos, res, equity_data, tech), unsafe_allow_html=True)
+
+    # 5b: Per-strike cards (unchanged logic, uses enriched_strikes for OI/Vol)
 
     # ── Per-strike subsections: header + note + kv rows ───────────────────────
     _STRIKE_META = {
@@ -1455,14 +1677,13 @@ if res:
         },
     }
 
-    # Volatility data for cushion warnings (prefer computed tech over Claude estimate)
+    # Volatility data for cushion warnings
     _hv    = tech.get("hv_20_pct") or intel.get("hv_20_pct")
     _atr   = tech.get("atr_14")    or intel.get("atr_14")
-    _days  = res.get("days_to_expiry") or 1
+    _gross_capital = _lot * _cmp
     _msig  = (_hv / _math.sqrt(12)) if _hv else None   # expected 1-month ±1σ move %
 
     def _warn_div(text: str, level: str) -> str:
-        """Coloured inline warning bar for use inside a card."""
         _clr, _bg = {
             "danger":  ("#F85149", "rgba(248,81,73,0.12)"),
             "caution": ("#D29922", "rgba(210,153,34,0.12)"),
@@ -1475,7 +1696,7 @@ if res:
             f'color:{_clr};font-size:12px;line-height:1.5;">{text}</div>'
         )
 
-    for s in res["strikes"]:
+    for s in enriched_strikes:
         stype = s["strike_type"]
         meta  = _STRIKE_META.get(
             stype, {"title": stype, "note": "", "bg": "rgba(255,255,255,0.04)", "border": "#444"}
@@ -1634,12 +1855,39 @@ if res:
         "Analyst targets and corporate dates from Claude AI · verify before trading."
     )
 
+    # ── 6. P&L Payoff Chart (shown last) ─────────────────────────────────────
+    st.markdown('<div class="section-hd">P&amp;L Payoff at Expiry</div>',
+                unsafe_allow_html=True)
 
-else:
-    placeholder = pd.DataFrame([
-        {"Strike type": t, "Strike (₹)": "-", "Net premium": "-",
-         "Breakeven": "-", "Max profit": "-", "Ann. yield %": "-",
-         "Downside protect.": "-"}
-        for t in ("ITM", "ATM", "OTM+1", "OTM+2")
-    ])
-    st.dataframe(placeholder, width="stretch", hide_index=True, height=185)
+    payoff_opts = ["All strikes"] + [s["strike_type"] for s in enriched_strikes]
+    payoff_sel  = st.radio("View payoff for", payoff_opts, horizontal=True, key="payoff_strike_sel")
+
+    line_fig = go.Figure()
+    for s in enriched_strikes:
+        if payoff_sel != "All strikes" and s["strike_type"] != payoff_sel:
+            continue
+        xs = [p["price"] for p in s["payoff"]]
+        ys = [p["pl"]    for p in s["payoff"]]
+        line_fig.add_trace(go.Scatter(
+            name=f"{s['strike_type']} ₹{s['strike']:,.0f}",
+            x=xs, y=ys,
+            mode="lines+markers",
+            line=dict(color=STRIKE_COLORS.get(s["strike_type"], "#20A4A0"), width=2),
+            marker=dict(size=5),
+        ))
+
+    line_fig.add_vline(
+        x=res["cmp"], line_width=1, line_dash="dash", line_color="#8B949E",
+        annotation_text=f"CMP ₹{res['cmp']:,.0f}",
+        annotation_position="top right",
+        annotation_font_size=11, annotation_font_color="#8B949E",
+    )
+    line_fig.add_hline(y=0, line_width=1, line_dash="dot", line_color="#8B949E")
+    line_fig.update_layout(
+        **_base_layout(height=260),
+        title=dict(text="P&L at expiry", font=dict(size=14)),
+        xaxis=dict(title="Stock price at expiry (₹)", showgrid=False, zeroline=False,
+                   gridcolor=GRID_COLOR),
+        yaxis=dict(title="P&L (₹)", showgrid=True, gridcolor=GRID_COLOR, zeroline=False),
+    )
+    st.plotly_chart(line_fig, width="stretch", config={"displayModeBar": False})
