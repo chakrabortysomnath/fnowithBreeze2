@@ -15,6 +15,9 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from auth import check_auth
 from nav import NAV_CSS, nav_bar
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000").rstrip("/")
@@ -35,6 +38,8 @@ st.set_page_config(
     page_icon="⚖️",
     layout="wide",
 )
+
+check_auth()
 
 st.markdown(NAV_CSS, unsafe_allow_html=True)
 nav_bar("compare")

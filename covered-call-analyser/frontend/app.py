@@ -13,6 +13,7 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
+from auth import check_auth
 from nav import NAV_CSS, nav_bar
 
 # ── Static equity metadata (sector / industry lookup) ─────────────────────────
@@ -67,6 +68,8 @@ st.set_page_config(
     page_icon="🤏",
     layout="centered",
 )
+
+check_auth()
 
 st.markdown(NAV_CSS, unsafe_allow_html=True)
 nav_bar("analyse")
