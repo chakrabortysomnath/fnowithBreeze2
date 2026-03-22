@@ -342,7 +342,16 @@ SECTIONS = [
                 "The realised annualised standard deviation of the stock's daily "
                 "log-returns over the past 20 trading sessions. "
                 "Comparing HV to IV shows whether options are expensive (IV > HV) "
-                "or cheap (IV < HV) — a key signal for covered-call sellers.",
+                "or cheap (IV < HV) — a key signal for covered-call sellers."
+                "----------------------------------------------------------"
+                "IV > HV Options are expensive"
+                "market fears more movement than history suggests "
+                ">>>>>>> Great time to sell covered calls - collect fat premiums"
+                "IV < HV Options are cheap" 
+                "market underestimating historical moves " 
+                ">>>>>> Thin premiums; covered calls less attractive"
+                "IV ≈ HV Fair value pricing"
+                "Neutral — evaluate on other merits",              
             ),
             (
                 "Beta",
