@@ -3,7 +3,8 @@ frontend/pages/compare.py — Instrument comparison tab for Breezy F&O.
 
 Allows the user to select 2–5 NSE F&O instruments and run a side-by-side
 covered call analysis using the existing backend analysis engine.
-No Claude API calls are made — pure Python / backend analysis only.
+Claude AI (Haiku) is used to rank instruments — cost is minimised via
+prompt caching and max_tokens=300.
 """
 
 import io
@@ -50,7 +51,7 @@ st.markdown("""
 </div>
 <p style="color:#8B949E; font-size:13px; margin-bottom:18px;">
   Select 2–5 F&amp;O instruments to compare covered call metrics side-by-side.
-  Analysis uses the nearest expiry for each instrument. No AI API calls — pure Python.
+  Analysis uses the nearest expiry for each instrument. Claude AI ranks the instruments.
 </p>
 """, unsafe_allow_html=True)
 
@@ -169,6 +170,67 @@ def _bs_greeks(S, K, T_days, sigma_pct, ltp_per_share, r=0.065):
         return None
 
 
+@st.cache_data(ttl=3600)
+def _claude_rank_instruments(instruments_json: str) -> dict:
+    """Ask Claude Haiku to rank instruments for covered call attractiveness.
+
+    instruments_json: compact JSON string built from enriched_results.
+    Cached 1 h so re-renders don't burn tokens.
+    Returns {"ranking": [...], "summary": "...", "_cost_usd": float,
+             "_input_tokens": int, "_output_tokens": int} or
+    {"error": "..."} on failure.
+    """
+    import json
+    try:
+        import anthropic
+    except ImportError:
+        return {"error": "anthropic package not installed"}
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        return {"error": "ANTHROPIC_API_KEY not set"}
+
+    _SYSTEM = (
+        "You are a covered call strategy analyst for NSE India F&O.\n"
+        "Given a list of instruments with their key metrics, rank them from most to least "
+        "attractive for a covered call strategy.\n"
+        "Key criteria (in order): annualised_yield_pct, downside_protection_pct, "
+        "open_interest (liquidity), iv_pct (higher = richer premium).\n"
+        "Return ONLY valid JSON — no markdown, no prose outside JSON:\n"
+        '{"ranking":[{"rank":1,"symbol":"X","reason":"one concise line"},...], '
+        '"summary":"2-3 sentence overall assessment"}'
+    )
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            system=[{
+                "type":       "text",
+                "text":       _SYSTEM,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=[{"role": "user", "content": instruments_json}],
+        )
+        raw = msg.content[0].text.strip()
+        # Strip any accidental markdown fences
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        result = json.loads(raw)
+        in_tok  = msg.usage.input_tokens
+        out_tok = msg.usage.output_tokens
+        cost    = in_tok * 0.80 / 1_000_000 + out_tok * 4.00 / 1_000_000
+        result["_cost_usd"]       = cost
+        result["_input_tokens"]   = in_tok
+        result["_output_tokens"]  = out_tok
+        return result
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 def _cmp_table_html(results: list[dict], strike_view: str, greeks_by_sym: dict) -> str:
     """Comparison table: rows = metric groups, columns = symbols.
 
@@ -204,11 +266,11 @@ def _cmp_table_html(results: list[dict], strike_view: str, greeks_by_sym: dict) 
         except Exception: return "—"
 
     # Source indicator dots
-    # breeze = ICICI Breeze live feed  api = External API (yfinance/Claude)  calc = Python/BS formula
     _SRC = {
         "breeze": '<span style="color:#F79000;font-size:9px;vertical-align:middle;" title="Source: ICICI Breeze live feed">●</span> ',
         "api":    '<span style="color:#BC8CFF;font-size:9px;vertical-align:middle;" title="Source: External API (yfinance)">●</span> ',
         "calc":   '<span style="color:#3FB950;font-size:9px;vertical-align:middle;" title="Source: Computed (Python / Black-Scholes)">●</span> ',
+        "claude": '<span style="color:#E05252;font-size:9px;vertical-align:middle;" title="Source: Claude AI">●</span> ',
     }
 
     def sec(title):
@@ -261,7 +323,8 @@ def _cmp_table_html(results: list[dict], strike_view: str, greeks_by_sym: dict) 
         f'<b style="color:#C9D1D9;">Data source: </b>'
         f'<span style="color:#F79000;">●</span> Breeze live feed &nbsp;'
         f'<span style="color:#BC8CFF;">●</span> External API (yfinance) &nbsp;'
-        f'<span style="color:#3FB950;">●</span> Computed (Python / Black-Scholes)'
+        f'<span style="color:#3FB950;">●</span> Computed (Python / Black-Scholes) &nbsp;'
+        f'<span style="color:#E05252;">●</span> Claude AI'
         f'</span></td></tr>'
     )
 
@@ -576,6 +639,71 @@ if st.session_state.cmp_results:
         _cmp_table_html(enriched_results, strike_view, greeks_by_sym),
         unsafe_allow_html=True,
     )
+
+    # ── Claude AI ranking ─────────────────────────────────────────────────────
+    st.markdown('<div class="section-hd">Claude AI Ranking</div>', unsafe_allow_html=True)
+
+    # Build compact JSON payload: only fields relevant to ranking
+    import json as _json_cmp
+    payload_items = []
+    for r in enriched_results:
+        s = _get_strike(r, strike_view)
+        payload_items.append({
+            "symbol":               r["symbol"],
+            "cmp":                  round(r["cmp"], 2),
+            "days_to_expiry":       r["days_to_expiry"],
+            "strike_type":          strike_view,
+            "annualised_yield_pct": round(s.get("annualised_yield_pct") or 0, 2) if s else None,
+            "downside_protection_pct": round(s.get("downside_protection_pct") or 0, 2) if s else None,
+            "open_interest":        s.get("open_interest") if s else None,
+            "iv_pct":               s.get("_iv_enriched") or s.get("iv") if s else None,
+        })
+    instruments_json = _json_cmp.dumps(payload_items, separators=(",", ":"))
+
+    ranking_result = _claude_rank_instruments(instruments_json)
+
+    if "error" in ranking_result:
+        st.info(f"Claude ranking unavailable: {ranking_result['error']}")
+    else:
+        cost_usd = ranking_result.get("_cost_usd", 0.0)
+        in_tok   = ranking_result.get("_input_tokens", 0)
+        out_tok  = ranking_result.get("_output_tokens", 0)
+
+        # Cost in bold as first line
+        st.markdown(
+            f'<p style="font-size:12px;color:#8B949E;margin-bottom:8px;">'
+            f'<span style="color:#E05252;">●</span> Claude AI '
+            f'<b style="color:#C9D1D9;">Cost: ~${cost_usd:.4f}</b> &nbsp;·&nbsp; '
+            f'{in_tok:,} in + {out_tok:,} out tokens · model: claude-haiku-4-5 · cached 1 h</p>',
+            unsafe_allow_html=True,
+        )
+
+        # Ranking list
+        ranking = ranking_result.get("ranking", [])
+        medals  = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+        for entry in ranking:
+            rank   = entry.get("rank", 0)
+            symbol = entry.get("symbol", "?")
+            reason = entry.get("reason", "")
+            medal  = medals[rank - 1] if 1 <= rank <= len(medals) else f"#{rank}"
+            st.markdown(
+                f'<div style="padding:6px 12px;border-left:3px solid #E05252;'
+                f'margin-bottom:6px;background:#161B22;border-radius:0 4px 4px 0;">'
+                f'<span style="font-size:14px;">{medal}</span> '
+                f'<b style="color:#58A6FF;">{symbol}</b> '
+                f'<span style="color:#8B949E;font-size:12px;">— {reason}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        # Summary paragraph
+        summary = ranking_result.get("summary", "")
+        if summary:
+            st.markdown(
+                f'<p style="color:#C9D1D9;font-size:13px;margin-top:8px;">'
+                f'<span style="color:#E05252;">●</span> {summary}</p>',
+                unsafe_allow_html=True,
+            )
 
     # CSV export (plain data, no Greeks)
     symbols_ok = [r["symbol"] for r in enriched_results]

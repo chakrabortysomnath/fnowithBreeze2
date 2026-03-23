@@ -637,11 +637,11 @@ def _strike_options_table_html(
             return "—"
 
     # Source indicator dots
-    # breeze = ICICI Breeze live feed  api = External API (yfinance/Claude)  calc = Python/BS formula
     _SRC = {
         "breeze": '<span style="color:#F79000;font-size:9px;vertical-align:middle;" title="Source: ICICI Breeze live feed">●</span> ',
-        "api":    '<span style="color:#BC8CFF;font-size:9px;vertical-align:middle;" title="Source: External API (yfinance / Claude)">●</span> ',
+        "api":    '<span style="color:#BC8CFF;font-size:9px;vertical-align:middle;" title="Source: External API (yfinance)">●</span> ',
         "calc":   '<span style="color:#3FB950;font-size:9px;vertical-align:middle;" title="Source: Computed (Python / Black-Scholes)">●</span> ',
+        "claude": '<span style="color:#E05252;font-size:9px;vertical-align:middle;" title="Source: Claude AI">●</span> ',
     }
 
     def sec(title: str) -> str:
@@ -682,8 +682,9 @@ def _strike_options_table_html(
         f'<span style="font-size:10px;color:#8B949E;">'
         f'<b style="color:#C9D1D9;">Data source: </b>'
         f'<span style="color:#F79000;">●</span> Breeze live feed &nbsp;'
-        f'<span style="color:#BC8CFF;">●</span> External API (yfinance / Claude) &nbsp;'
-        f'<span style="color:#3FB950;">●</span> Computed (Python / Black-Scholes)'
+        f'<span style="color:#BC8CFF;">●</span> External API (yfinance) &nbsp;'
+        f'<span style="color:#3FB950;">●</span> Computed (Python / Black-Scholes) &nbsp;'
+        f'<span style="color:#E05252;">●</span> Claude AI'
         f'</span></td></tr>'
     )
 
@@ -1147,19 +1148,29 @@ def _fetch_sector_ohlc(sector: str | None) -> pd.DataFrame | None:
         return None
 
 
-def _kv_table_html(rows: list[tuple[str, str, str]]) -> str:
+def _kv_table_html(rows: list[tuple]) -> str:
     """Return HTML for a 2-column KV table.
 
+    Each row is a 3-tuple (name, desc, value) or a 4-tuple (name, desc, value, source).
+    source: "breeze" | "api" | "calc" | "claude"  — renders a coloured dot before the name.
     Column 1: field name with a ⓘ tooltip icon (title=desc on hover).
     Column 2: value (monospace, right-aligned).
-    Descriptions are shown on hover only — matches the Bypass Claude AI ? tooltip pattern.
     """
+    _SRC_DOTS = {
+        "breeze": '<span style="color:#F79000;font-size:9px;vertical-align:middle;" title="Source: ICICI Breeze live feed">●</span> ',
+        "api":    '<span style="color:#BC8CFF;font-size:9px;vertical-align:middle;" title="Source: External API (yfinance)">●</span> ',
+        "calc":   '<span style="color:#3FB950;font-size:9px;vertical-align:middle;" title="Source: Computed (Python / Black-Scholes)">●</span> ',
+        "claude": '<span style="color:#E05252;font-size:9px;vertical-align:middle;" title="Source: Claude AI">●</span> ',
+    }
     cell = "padding:6px 12px;border-bottom:1px solid #30363D;vertical-align:middle;"
     out  = [
         '<table style="width:100%;border-collapse:collapse;'
         'font-family:Inter,\'Segoe UI\',sans-serif;margin-bottom:4px;">'
     ]
-    for name, desc, value in rows:
+    for row in rows:
+        name, desc, value = row[0], row[1], row[2]
+        source = row[3] if len(row) >= 4 else None
+        _dot  = _SRC_DOTS.get(source, "") if source else ""
         _tip  = f' title="{desc}"' if desc else ""
         _icon = (
             ' <span style="color:#8B949E;font-size:11px;cursor:help;">ⓘ</span>'
@@ -1169,7 +1180,7 @@ def _kv_table_html(rows: list[tuple[str, str, str]]) -> str:
             f'<tr>'
             f'<td style="{cell} width:62%;"{_tip}>'
             f'<span style="color:#E6EDF3;font-size:13px;font-weight:500;">'
-            f'{name}{_icon}</span>'
+            f'{_dot}{name}{_icon}</span>'
             f'</td>'
             f'<td style="{cell} width:38%;text-align:right;'
             f'color:#C9D1D9;font-size:13px;'
@@ -1524,13 +1535,14 @@ if res:
         ("Sector HV 20-Day", "Annualised 20-day HV of the matching Nifty sector index",
          f"{sector_hv:.1f}%" if sector_hv else "—"),
     ]
+    _claude_src = "claude" if _intel_source == "claude_api" else None
     if intel.get("analyst_target_low") or intel.get("analyst_target_mean") or intel.get("analyst_target_high"):
         overview_rows.append(
-            ("Analyst Targets", f"Consensus price targets from {n_analysts} analysts", _fmt_targets())
+            ("Analyst Targets", f"Consensus price targets from {n_analysts} analysts", _fmt_targets(), _claude_src)
         )
     if intel.get("analyst_recommendation"):
         overview_rows.append(
-            ("Recommendation", "Analyst consensus rating", (intel.get("analyst_recommendation") or "—").upper())
+            ("Recommendation", "Analyst consensus rating", (intel.get("analyst_recommendation") or "—").upper(), _claude_src)
         )
     for label, tip, val in [
         ("Earnings Date",    "Next quarterly / annual results announcement", earn_date),
@@ -1539,7 +1551,7 @@ if res:
         ("AGM",              "Annual General Meeting date", agm_date),
     ]:
         if val:
-            overview_rows.append((label, tip, val))
+            overview_rows.append((label, tip, val, _claude_src))
 
     st.markdown(_kv_table_html(overview_rows), unsafe_allow_html=True)
     if _intel_source == "claude_api":
