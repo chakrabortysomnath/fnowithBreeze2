@@ -1,0 +1,310 @@
+[
+  {
+    "section": "Options Basics",
+    "emoji": "🎯",
+    "terms": [
+      {
+        "term": "CMP — Current Market Price",
+        "definition": "The last traded price of the underlying equity share on the NSE. All strike selection and moneyness calculations are anchored to the CMP."
+      },
+      {
+        "term": "LTP — Last Traded Price",
+        "definition": "The most recent transaction price for an option contract. Used as the option premium when no bid/ask mid is available."
+      },
+      {
+        "term": "Premium",
+        "definition": "The price paid (buyer) or received (seller) for an options contract. In a covered-call strategy the seller *receives* the premium upfront, reducing the effective cost basis of the held shares."
+      },
+      {
+        "term": "Strike Price",
+        "definition": "The fixed price at which the option buyer has the right to purchase (call) or sell (put) the underlying shares. Chosen by the strategy relative to the CMP — see ITM, ATM, OTM below."
+      },
+      {
+        "term": "ITM — In The Money",
+        "definition": "A call option whose strike price is *below* the current CMP. It has intrinsic value. An ITM covered call collects a higher premium but caps upside sooner."
+      },
+      {
+        "term": "ATM — At The Money",
+        "definition": "A call option whose strike price is approximately *equal* to the CMP. ATM options have the highest time value (extrinsic value) relative to premium and are the default comparison point in this app."
+      },
+      {
+        "term": "OTM — Out of The Money",
+        "definition": "A call option whose strike price is *above* the current CMP. It has no intrinsic value, only time value. OTM+1 and OTM+2 refer to the first and second strike above ATM."
+      },
+      {
+        "term": "Intrinsic Value",
+        "definition": "The immediate exercise value of an option: max(CMP − Strike, 0) for a call. OTM options have zero intrinsic value."
+      },
+      {
+        "term": "Time Value (Extrinsic Value)",
+        "definition": "The portion of the option premium above intrinsic value. Reflects the probability the option moves further in-the-money before expiry. Decays to zero at expiry (see Theta)."
+      },
+      {
+        "term": "Expiry / Expiry Date",
+        "definition": "The date on which the F&O contract ceases to exist. NSE monthly contracts expire on the last Thursday of each month. After expiry, in-the-money calls are exercised and out-of-the-money calls expire worthless."
+      },
+      {
+        "term": "DTE — Days to Expiry",
+        "definition": "Calendar days remaining until the contract's expiry date. Annualised yield calculations use DTE to scale premium income (formula: yield% × 365 / DTE)."
+      },
+      {
+        "term": "IV — Implied Volatility",
+        "definition": "The market's consensus forecast of how much the underlying will move, expressed as an annualised percentage standard deviation. Derived by reverse-solving the Black-Scholes formula from the option's market price. Higher IV → higher premiums."
+      },
+      {
+        "term": "OI — Open Interest",
+        "definition": "The total number of outstanding option contracts that have not been settled or closed. High OI indicates a liquid, actively traded strike. Low OI can lead to wide bid-ask spreads."
+      },
+      {
+        "term": "Volume",
+        "definition": "The number of option contracts traded on the current session. A useful liquidity signal alongside OI."
+      },
+      {
+        "term": "Moneyness %",
+        "definition": "How far the strike is from the CMP, expressed as a percentage. Formula: (Strike − CMP) / CMP × 100. Negative = ITM; near zero = ATM; positive = OTM."
+      }
+    ]
+  },
+  {
+    "section": "Covered Call Strategy",
+    "emoji": "📈",
+    "terms": [
+      {
+        "term": "Covered Call",
+        "definition": "An options strategy where an investor who *holds* shares simultaneously *sells* (writes) call options on those shares. The premium received reduces cost basis and provides downside cushion. The risk: shares may be called away if CMP exceeds the strike at expiry."
+      },
+      {
+        "term": "Buy-Write",
+        "definition": "A covered call where the shares and the short call are initiated simultaneously. The net cost is the share purchase price minus the premium received."
+      },
+      {
+        "term": "Holdings / Shares Held",
+        "definition": "The number of shares already owned by the investor on which calls are written. Must be a multiple of the F&O lot size."
+      },
+      {
+        "term": "Lot Size",
+        "definition": "The minimum number of shares in one F&O contract. Set by SEBI/NSE and revised periodically. For example, RELIANCE lot size = 250 means one call contract covers 250 shares."
+      },
+      {
+        "term": "Quantity Held (Lots)",
+        "definition": "Number of F&O lots held. Determines the number of call contracts that can be written in a covered position."
+      }
+    ]
+  },
+  {
+    "section": "Performance Metrics",
+    "emoji": "💰",
+    "terms": [
+      {
+        "term": "Gross Premium (₹/share)",
+        "definition": "The option LTP multiplied by lot size, before deducting any charges. This is the raw premium income per lot."
+      },
+      {
+        "term": "Net Premium / Share",
+        "definition": "Gross premium per share minus all charges (brokerage, STT, GST) allocated per share. This is the true income per share from writing the call."
+      },
+      {
+        "term": "Net Premium Total (₹)",
+        "definition": "Net premium per share × total shares held across all lots. The actual cash received after all transaction costs."
+      },
+      {
+        "term": "Premium Yield %",
+        "definition": "Net Premium Total ÷ Capital Deployed × 100. Measures income as a percentage of capital for the period to expiry."
+      },
+      {
+        "term": "Annualised Yield %",
+        "definition": "Premium Yield % scaled to a 365-day year: Premium Yield% × 365 / DTE. Allows fair comparison of strategies with different expiry dates. The primary ranking metric in this app."
+      },
+      {
+        "term": "Breakeven (₹)",
+        "definition": "The share price at which the position neither profits nor loses: CMP − Net Premium per share. If the share falls to this level, the premium exactly offsets the capital loss."
+      },
+      {
+        "term": "Downside Protection %",
+        "definition": "How far the CMP must fall before the investor loses money: (CMP − Breakeven) / CMP × 100. Equivalent to the premium yield expressed as downside cushion."
+      },
+      {
+        "term": "Max Profit Total (₹)",
+        "definition": "The maximum possible gain from the covered call at expiry, achieved when the share price is at or above the strike price at expiry: (Strike − Cost Basis + Net Premium) × Shares."
+      },
+      {
+        "term": "Total Return if Assigned",
+        "definition": "The end-to-end percentage return if the shares are called away (assigned) at the strike price: (Strike − Average Purchase Price + Net Premium) / Average Purchase Price × 100."
+      },
+      {
+        "term": "Yield on Build Cost",
+        "definition": "Net Premium Total ÷ Total Cost Basis of held shares × 100. Useful for investors who bought shares earlier at a different price."
+      }
+    ]
+  },
+  {
+    "section": "Cost & Capital",
+    "emoji": "🏦",
+    "terms": [
+      {
+        "term": "Brokerage",
+        "definition": "Fixed fee charged per options leg by the broker. Typical flat-rate brokers charge ₹20–₹40 per executed order. This app defaults to ₹40 per lot and deducts it from gross premium."
+      },
+      {
+        "term": "STT — Securities Transaction Tax",
+        "definition": "A government tax on options premium. For selling options, STT is levied on the premium at 0.1% (as of FY2025). Deducted from gross premium in net premium calculation."
+      },
+      {
+        "term": "GST — Goods & Services Tax",
+        "definition": "18% GST is levied on brokerage and exchange transaction charges. A modest but real cost included in total charges."
+      },
+      {
+        "term": "Charges Total (₹)",
+        "definition": "Sum of brokerage + STT + GST for the option leg. Deducted from gross premium to arrive at net premium."
+      },
+      {
+        "term": "Charges %",
+        "definition": "Charges Total as a percentage of Gross Premium. A high charges% indicates a low-premium strike where costs consume a significant portion of income."
+      },
+      {
+        "term": "Capital Deployed (₹)",
+        "definition": "Total market value of shares held: CMP × Shares. The base against which yield percentages are calculated."
+      },
+      {
+        "term": "Cost Basis / Share",
+        "definition": "The investor's actual average purchase price per share, entered manually. Used for total-return and build-cost-yield calculations. If not provided, CMP is used."
+      },
+      {
+        "term": "Build-Up Cost",
+        "definition": "The effective net cost per share after receiving the option premium: CMP − Net Premium per share. Lowers the break-even price."
+      },
+      {
+        "term": "Purchase Cost (1 Lot)",
+        "definition": "CMP × Lot Size — the capital required to buy one full lot of shares to support a single covered call contract."
+      }
+    ]
+  },
+  {
+    "section": "Option Greeks",
+    "emoji": "🔢",
+    "terms": [
+      {
+        "term": "Δ Delta",
+        "definition": "Rate of change of option price per ₹1 move in the underlying. For a call, Delta ranges from 0 (deep OTM) to 1 (deep ITM). ATM calls have Delta ≈ 0.5. As a covered-call seller, your net position Delta = 1 (shares) − Delta (short call)."
+      },
+      {
+        "term": "Γ Gamma",
+        "definition": "Rate of change of Delta per ₹1 move in the underlying. High Gamma near expiry means Delta changes rapidly. Short Gamma (as a call writer) means losses accelerate if the underlying makes a large upward move."
+      },
+      {
+        "term": "Θ Theta (₹/share/day)",
+        "definition": "Daily time-value decay of the option premium. A call seller *benefits* from Theta — each day that passes without a large move in the underlying, the option loses value and the seller keeps more of the premium."
+      },
+      {
+        "term": "V Vega (₹/share per +1% IV)",
+        "definition": "Sensitivity of option price to a 1% absolute change in implied volatility. A call seller is short Vega — a volatility spike after the call is sold increases the option's value and creates a mark-to-market loss."
+      },
+      {
+        "term": "ρ Rho (₹/share per +1% rate)",
+        "definition": "Sensitivity of option price to a 1% change in the risk-free interest rate. Generally the smallest Greek in practice; more relevant for long-dated options."
+      }
+    ]
+  },
+  {
+    "section": "Technical & Risk Indicators",
+    "emoji": "📊",
+    "terms": [
+      {
+        "term": "HV — Historical Volatility (20-Day)",
+        "definition": "The realised annualised standard deviation of the stock's daily log-returns over the past 20 trading sessions. Comparing HV to IV shows whether options are expensive (IV > HV) or cheap (IV < HV) — a key signal for covered-call sellers."
+      },
+      {
+        "term": "Beta",
+        "definition": "Measures how much the stock moves relative to the broader market (Nifty 50). Beta = 1.2 means the stock tends to move 1.2% for every 1% move in the index. High-Beta stocks carry more systematic risk."
+      },
+      {
+        "term": "ATR — Average True Range (14-Day)",
+        "definition": "Average of the last 14 sessions' true range (max of: high-low, |high−prev close|, |low−prev close|). A practical measure of day-to-day price movement in rupee terms."
+      },
+      {
+        "term": "52-Week High / Low",
+        "definition": "The highest and lowest closing price over the past 52 weeks. Used to contextualise the CMP and assess how extended or oversold a stock is."
+      },
+      {
+        "term": "52-Week Position %",
+        "definition": "(CMP − 52W Low) / (52W High − 52W Low) × 100. 0% = at the 52-week low; 100% = at the 52-week high."
+      },
+      {
+        "term": "Key Support",
+        "definition": "A significant price level below CMP where buying interest has historically emerged and halted declines. Used to assess downside risk relative to the breakeven."
+      },
+      {
+        "term": "Key Resistance",
+        "definition": "A significant price level above CMP where selling pressure has historically capped advances. A strike set at or near resistance is a common covered-call placement."
+      },
+      {
+        "term": "Momentum (1-Month)",
+        "definition": "Percentage price change over the past 30 days. Positive momentum may suggest trend continuation; negative momentum may indicate a weakening underlying."
+      },
+      {
+        "term": "Expected ±1σ Move / Month",
+        "definition": "The one-standard-deviation price range the stock is expected to trade within over one month, derived from IV: CMP × IV × √(30/365). Roughly 68% probability the stock stays within this band."
+      }
+    ]
+  },
+  {
+    "section": "Put-Call Parity & Futures",
+    "emoji": "⚖️",
+    "terms": [
+      {
+        "term": "Put-Call Parity",
+        "definition": "A no-arbitrage relationship between call price, put price, strike, spot price and time: C − P = S − K·e^(−rT). Implies that for any call option there is a theoretically equivalent put option at the same strike and expiry."
+      },
+      {
+        "term": "Implied Put Price",
+        "definition": "The put price derived from the call price via put-call parity. Useful for assessing whether the market is pricing in asymmetric fear (put skew) relative to the theoretical no-arbitrage value."
+      },
+      {
+        "term": "Put Delta (approx.)",
+        "definition": "Approximate delta of the equivalent put: Put Delta ≈ Call Delta − 1. A call with Delta 0.4 implies a put with Delta ≈ −0.6."
+      },
+      {
+        "term": "Approx. Futures Price",
+        "definition": "Fair value of the near-month futures contract: Futures ≈ CMP × (1 + r × T), where r is the risk-free rate and T is time to expiry in years. Options are priced off futures, not the spot price, in the NSE F&O segment."
+      }
+    ]
+  },
+  {
+    "section": "Data & Configuration",
+    "emoji": "⚙️",
+    "terms": [
+      {
+        "term": "F&O Code (Breeze Shortcode)",
+        "definition": "The ticker symbol used by the ICICI Breeze API for F&O instruments. Often different from the NSE equity ticker — e.g., 'RELIND' (Breeze) maps to 'RELIANCE' (NSE)."
+      },
+      {
+        "term": "NSE Ticker",
+        "definition": "The symbol used by NSE for the equity share and by yfinance for historical price data. Used in this app for chart history lookups."
+      },
+      {
+        "term": "Breeze Session Token",
+        "definition": "A daily authentication token issued by ICICI Direct after login. Required by the Breeze API for all market data requests. Expires at midnight and must be refreshed each morning."
+      },
+      {
+        "term": "Sector / Industry",
+        "definition": "GICS-style classification of the company. Used to provide context in the analysis output (e.g., 'Energy / Oil & Gas Integrated'). Stored in equity_meta.json and editable via the Config page."
+      },
+      {
+        "term": "equity_meta.json",
+        "definition": "A JSON file in the frontend directory that stores sector and industry metadata for each F&O symbol. Read by both the frontend and backend. Editable via the Config → Equity Metadata tab."
+      },
+      {
+        "term": "lot_sizes.json",
+        "definition": "Persistent store for F&O lot sizes, shared between frontend and backend. Updated via Config → Lot Sizes. Survives backend restarts."
+      },
+      {
+        "term": "nse_symbols.json",
+        "definition": "Persistent store for F&O code → NSE ticker mappings. Updated via Config → NSE Symbol Mapping. Survives backend restarts."
+      },
+      {
+        "term": "BACKEND_URL",
+        "definition": "Environment variable that tells the Streamlit frontend where to find the FastAPI backend. Defaults to http://localhost:8000 if not set."
+      }
+    ]
+  }
+]

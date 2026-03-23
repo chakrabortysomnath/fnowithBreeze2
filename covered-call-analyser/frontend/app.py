@@ -636,14 +636,23 @@ def _strike_options_table_html(
         except Exception:
             return "—"
 
+    # Source indicator dots
+    # breeze = ICICI Breeze live feed  api = External API (yfinance/Claude)  calc = Python/BS formula
+    _SRC = {
+        "breeze": '<span style="color:#F79000;font-size:9px;vertical-align:middle;" title="Source: ICICI Breeze live feed">●</span> ',
+        "api":    '<span style="color:#BC8CFF;font-size:9px;vertical-align:middle;" title="Source: External API (yfinance / Claude)">●</span> ',
+        "calc":   '<span style="color:#3FB950;font-size:9px;vertical-align:middle;" title="Source: Computed (Python / Black-Scholes)">●</span> ',
+    }
+
     def sec(title: str) -> str:
         return f'<tr><td colspan="{ncols}" style="{shd}">{title}</td></tr>'
 
-    def row(metric: str, tip: str, vals: dict, fmt: str) -> str:
+    def row(metric: str, tip: str, vals: dict, fmt: str, src: str = "calc") -> str:
+        dot   = _SRC.get(src, "")
         tip_a = f' title="{tip}"' if tip else ""
         icon  = (' <span style="color:#8B949E;font-size:10px;cursor:help;">ⓘ</span>'
                  if tip else "")
-        r = f'<tr><td style="{mtd}"{tip_a}>{metric}{icon}</td>'
+        r = f'<tr><td style="{mtd}"{tip_a}>{dot}{metric}{icon}</td>'
         for t in types:
             r += f'<td style="{td}">{_fmt(vals.get(t), fmt)}</td>'
         return r + "</tr>"
@@ -667,78 +676,89 @@ def _strike_options_table_html(
         )
     out.append('</tr></thead><tbody>')
 
+    # Source legend row
+    out.append(
+        f'<tr><td colspan="{ncols}" style="padding:4px 10px 6px;border-bottom:1px solid #21262D;">'
+        f'<span style="font-size:10px;color:#8B949E;">'
+        f'<b style="color:#C9D1D9;">Data source: </b>'
+        f'<span style="color:#F79000;">●</span> Breeze live feed &nbsp;'
+        f'<span style="color:#BC8CFF;">●</span> External API (yfinance / Claude) &nbsp;'
+        f'<span style="color:#3FB950;">●</span> Computed (Python / Black-Scholes)'
+        f'</span></td></tr>'
+    )
+
     # ── STRIKES ──────────────────────────────────────────────────────────────
     out.append(sec("── STRIKES ──"))
     out.append(row("Moneyness %",
                    "(Strike − CMP) / CMP × 100. Negative = ITM, positive = OTM.",
-                   {t: (_v(t, "strike") - cmp) / cmp * 100 for t in types}, "spct1"))
+                   {t: (_v(t, "strike") - cmp) / cmp * 100 for t in types}, "spct1", "calc"))
     out.append(row("Intrinsic Value (₹/share)",
                    "max(CMP − Strike, 0) — minimum value if expiry were today.",
-                   {t: max(cmp - _v(t, "strike"), 0.0) for t in types}, "inr"))
+                   {t: max(cmp - _v(t, "strike"), 0.0) for t in types}, "inr", "calc"))
     out.append(row("Time Value (₹/share)",
                    "Premium LTP − Intrinsic Value. Value from time remaining and volatility.",
-                   {t: _gv(t, "time_value") for t in types}, "inr"))
+                   {t: _gv(t, "time_value") for t in types}, "inr", "calc"))
 
     # ── PREMIUM & INCOME ─────────────────────────────────────────────────────
     out.append(sec("── PREMIUM & INCOME ──"))
     out.append(row("Gross Premium LTP (₹/share)",
                    "Option last traded price — gross premium per share before any charges.",
-                   {t: _v(t, "premium") for t in types}, "inr"))
+                   {t: _v(t, "premium") for t in types}, "inr", "breeze"))
     out.append(row("Net Premium / Share (₹)",
                    "Gross premium minus all charges, per share.",
-                   {t: _v(t, "net_premium_per_share") for t in types}, "inr"))
+                   {t: _v(t, "net_premium_per_share") for t in types}, "inr", "calc"))
     out.append(row("Net Premium Total (₹)",
                    "Total net premium for the full lot after all charges.",
-                   {t: _v(t, "net_premium_total") for t in types}, "inr"))
+                   {t: _v(t, "net_premium_total") for t in types}, "inr", "calc"))
     out.append(row("Charges Total (₹)",
                    "Total transaction costs: STT + Brokerage + GST.",
-                   {t: _v(t, "charges", "total") for t in types}, "inr"))
+                   {t: _v(t, "charges", "total") for t in types}, "inr", "calc"))
     out.append(row("  ↳ STT (₹)",
                    "Securities Transaction Tax on gross premium received (0.1%).",
-                   {t: _v(t, "charges", "stt") for t in types}, "inr"))
+                   {t: _v(t, "charges", "stt") for t in types}, "inr", "calc"))
     out.append(row("  ↳ Brokerage (₹)",
                    "Fixed brokerage per lot written.",
-                   {t: _v(t, "charges", "brokerage") for t in types}, "inr"))
+                   {t: _v(t, "charges", "brokerage") for t in types}, "inr", "calc"))
     out.append(row("  ↳ GST (₹)",
                    "Goods & Services Tax on brokerage (18%).",
-                   {t: _v(t, "charges", "gst") for t in types}, "inr"))
+                   {t: _v(t, "charges", "gst") for t in types}, "inr", "calc"))
     out.append(row("Charges %",
                    "Total charges as percentage of gross premium — cost drag.",
                    {t: (_v(t, "charges", "total") / _v(t, "gross_premium_total") * 100
                         if _v(t, "gross_premium_total") else None)
-                    for t in types}, "pct1"))
+                    for t in types}, "pct1", "calc"))
 
     # ── MARKET DATA ──────────────────────────────────────────────────────────
     out.append(sec("── MARKET DATA ──"))
     out.append(row("Implied Volatility %",
                    "Market's expected future price movement. From Breeze live feed or "
                    "computed via Black-Scholes inversion from the LTP.",
-                   {t: _v(t, "_iv_enriched") for t in types}, "pct1"))
+                   {t: _v(t, "_iv_enriched") for t in types}, "pct1", "breeze"))
     out.append(row("Open Interest",
                    "Total outstanding contracts at this strike — higher = more liquid.",
-                   {t: _v(t, "open_interest") for t in types}, "int"))
+                   {t: _v(t, "open_interest") for t in types}, "int", "breeze"))
     out.append(row("Volume",
                    "Number of contracts traded today — use as secondary liquidity signal.",
-                   {t: _v(t, "volume") for t in types}, "int"))
+                   {t: _v(t, "volume") for t in types}, "int", "breeze"))
 
     # ── PERFORMANCE ──────────────────────────────────────────────────────────
     out.append(sec("── PERFORMANCE ──"))
     out.append(row("Breakeven (₹)",
                    "Stock price at expiry where position P&L = 0: Cost Basis − Net Premium/Share.",
-                   {t: _v(t, "breakeven") for t in types}, "inr0"))
+                   {t: _v(t, "breakeven") for t in types}, "inr0", "calc"))
     out.append(row("Downside Protection %",
                    "How far stock can fall from CMP before a loss: (CMP − Breakeven) / CMP.",
-                   {t: _v(t, "downside_protection_pct") for t in types}, "pct2"))
+                   {t: _v(t, "downside_protection_pct") for t in types}, "pct2", "calc"))
     out.append(row("Premium Yield %",
                    "Net premium as % of total capital deployed (net_premium / total_cost).",
-                   {t: _v(t, "premium_yield_pct") for t in types}, "pct2"))
+                   {t: _v(t, "premium_yield_pct") for t in types}, "pct2", "calc"))
     out.append(row("★ Annualised Yield %",
                    "Premium yield scaled to 365 days. Compare against FD or debt-fund returns.",
-                   {t: _v(t, "annualised_yield_pct") for t in types}, "pct1"))
+                   {t: _v(t, "annualised_yield_pct") for t in types}, "pct1", "calc"))
     out.append(row("Max Profit Total (₹)",
                    "Best-case P&L if stock is called away at strike: "
                    "(Strike − Cost Basis + Net Premium/Share) × Shares.",
-                   {t: _v(t, "max_profit_total") for t in types}, "inr"))
+                   {t: _v(t, "max_profit_total") for t in types}, "inr", "calc"))
 
     # ── GREEKS ───────────────────────────────────────────────────────────────
     out.append(sec("── GREEKS (Black-Scholes, r = 6.5%) ──"))
@@ -753,22 +773,22 @@ def _strike_options_table_html(
     out.append(row("Δ Delta",
                    "Call delta = N(d1): probability of expiring ITM and sensitivity to CMP. "
                    "Net position delta = 1.0 (long stock) − Δ (short call).",
-                   {t: _gv(t, "delta") for t in types}, "f4"))
+                   {t: _gv(t, "delta") for t in types}, "f4", "calc"))
     out.append(row("Γ Gamma",
                    "Rate of change of delta per ₹1 move in CMP. "
                    "High gamma near ATM means delta changes rapidly.",
-                   {t: _gv(t, "gamma") for t in types}, "f6"))
+                   {t: _gv(t, "gamma") for t in types}, "f6", "calc"))
     out.append(row("Θ Theta / day (₹/share, seller)",
                    "Daily time decay benefit for the call seller — option loses this much value per calendar day.",
-                   {t: _gv(t, "theta_per_day") for t in types}, "inr"))
+                   {t: _gv(t, "theta_per_day") for t in types}, "inr", "calc"))
     out.append(row("V Vega loss / +1% IV (₹/share)",
                    "₹ loss per share per +1% rise in implied volatility. "
                    "Short-call seller is short vega — rising IV increases the cost to close.",
-                   {t: _gv(t, "vega") for t in types}, "inr"))
+                   {t: _gv(t, "vega") for t in types}, "inr", "calc"))
     out.append(row("ρ Rho / +1% rate (₹/share)",
                    "₹ change per 1% increase in the risk-free rate. "
                    "Positive for long call; minor effect for short-dated options.",
-                   {t: _gv(t, "rho") for t in types}, "inr"))
+                   {t: _gv(t, "rho") for t in types}, "inr", "calc"))
 
     # ── PUT-CALL SUMMARY ────────────────────────────────────────────────────
     out.append(sec("── PUT-CALL SUMMARY ──"))
@@ -782,11 +802,11 @@ def _strike_options_table_html(
     out.append(row("Implied Put Price (₹/share)",
                    "Theoretical European put price from Put-Call Parity. "
                    "Actual traded put may differ due to early-exercise premium (American options).",
-                   {t: _gv(t, "implied_put") for t in types}, "inr"))
+                   {t: _gv(t, "implied_put") for t in types}, "inr", "calc"))
     out.append(row("Put Delta (approx.)",
                    "Approximate put delta = Δ − 1 (from Put-Call parity). Negative for long put.",
                    {t: ((_gv(t, "delta") or 0) - 1.0) if _gv(t, "delta") is not None else None
-                    for t in types}, "f4"))
+                    for t in types}, "f4", "calc"))
 
     out.append('</tbody></table></div>')
     return "".join(out)
