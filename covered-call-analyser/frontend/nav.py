@@ -2,9 +2,11 @@
 nav.py — Shared top navigation bar and CSS overrides for Breezy F&O.
 
 Usage in every page:
-    from nav import NAV_CSS, nav_bar
+    from nav import NAV_CSS, nav_bar, brand_header
     st.markdown(NAV_CSS, unsafe_allow_html=True)
-    nav_bar("analyse")   # or "watchlist" / "config"
+    nav_bar("analyse")              # or "compare" / "config" / "glossary"
+    brand_header()                  # home page — logo only
+    brand_header("⚙️", "Configuration", subtitle="Manage master data.")
 """
 
 import streamlit as st
@@ -86,6 +88,42 @@ NAV_CSS = """
   }
 </style>
 """
+
+
+def brand_header(
+    page_icon: str | None = None,
+    page_title: str | None = None,
+    subtitle: str = "",
+) -> None:
+    """Render the common 🤏 Breezy F&O brand logo.
+
+    Optionally shows a page-specific icon + title beneath the main logo,
+    and an optional subtitle paragraph.
+
+    Call immediately after nav_bar() on every page.
+    """
+    html = (
+        '<div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;">'
+        '<span style="font-size:44px;line-height:1;">🤏</span>'
+        '<span style="font-size:36px;font-weight:900;color:#58A6FF;'
+        "letter-spacing:-1px;font-family:'Segoe UI',Inter,sans-serif;"
+        '">Breezy F&amp;O</span>'
+        '</div>'
+    )
+    if page_icon and page_title:
+        html += (
+            '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">'
+            f'<span style="font-size:22px;line-height:1;">{page_icon}</span>'
+            f'<span style="font-size:20px;font-weight:700;color:#8B949E;'
+            "font-family:'Segoe UI',Inter,sans-serif;"
+            f'">{page_title}</span>'
+            '</div>'
+        )
+    if subtitle:
+        html += (
+            f'<p style="color:#8B949E;font-size:13px;margin-bottom:18px;">{subtitle}</p>'
+        )
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def nav_bar(active: str) -> None:

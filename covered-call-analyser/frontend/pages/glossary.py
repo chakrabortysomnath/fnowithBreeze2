@@ -6,14 +6,11 @@ without touching Python code.
 """
 
 import json
-import os
 import pathlib
-import sys
 
 import streamlit as st
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from nav import NAV_CSS, nav_bar
+from nav import NAV_CSS, brand_header, nav_bar
 
 st.set_page_config(
     page_title="Ready Reckoner — Breezy F&O",
@@ -23,20 +20,13 @@ st.set_page_config(
 
 st.markdown(NAV_CSS, unsafe_allow_html=True)
 nav_bar("glossary")
-
-st.markdown("""
-<div style="display:flex; align-items:center; gap:12px; margin-bottom:4px;">
-  <span style="font-size:36px; line-height:1;">📖</span>
-  <span style="font-size:32px; font-weight:900; color:#58A6FF;
-               letter-spacing:-1px; font-family:'Segoe UI',Inter,sans-serif;">
-    Ready Reckoner
-  </span>
-</div>
-<p style="color:#8B949E; font-size:13px; margin-bottom:18px;">
-  Plain-English definitions for every term, metric and abbreviation used in this app.
-  Use the search box below or browse by section.
-</p>
-""", unsafe_allow_html=True)
+brand_header(
+    "📖", "Ready Reckoner",
+    subtitle=(
+        "Plain-English definitions for every term, metric and abbreviation used in this app. "
+        "Use the search box below or browse by section."
+    ),
+)
 
 # ── Load terms from JSON ───────────────────────────────────────────────────────
 

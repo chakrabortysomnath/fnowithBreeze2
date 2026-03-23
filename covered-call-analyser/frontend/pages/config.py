@@ -10,16 +10,12 @@ Provides review, edit, add, and delete capabilities for all master data:
 
 import json
 import os
-import sys
 
 import pandas as pd
 import requests
 import streamlit as st
 
-# Allow importing auth.py from the parent frontend/ directory
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from auth import check_auth
-from nav import NAV_CSS, nav_bar
+from nav import NAV_CSS, brand_header, nav_bar
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000").rstrip("/")
 
@@ -31,26 +27,15 @@ st.set_page_config(
     layout="centered",
 )
 
-check_auth()
-
 st.markdown(NAV_CSS, unsafe_allow_html=True)
 nav_bar("config")
-
-# ── Brand header ──────────────────────────────────────────────────────────────
-
-st.markdown("""
-<div style="display:flex; align-items:center; gap:12px; margin-bottom:4px;">
-  <span style="font-size:36px; line-height:1;">⚙️</span>
-  <span style="font-size:32px; font-weight:900; color:#58A6FF;
-               letter-spacing:-1px; font-family:'Segoe UI',Inter,sans-serif;">
-    Configuration
-  </span>
-</div>
-<p style="color:#8B949E; font-size:13px; margin-bottom:18px;">
-  Manage all master data — lot sizes, symbol mappings, equity metadata and Breeze session.
-  All changes are persisted to JSON files and survive backend restarts.
-</p>
-""", unsafe_allow_html=True)
+brand_header(
+    "⚙️", "Configuration",
+    subtitle=(
+        "Manage all master data — lot sizes, symbol mappings, equity metadata and Breeze session. "
+        "All changes are persisted to JSON files and survive backend restarts."
+    ),
+)
 
 # ── Data fetchers ─────────────────────────────────────────────────────────────
 
