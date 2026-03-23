@@ -11,7 +11,6 @@ import math as _math
 import os
 
 import pandas as pd
-import plotly.graph_objects as go
 import requests
 import streamlit as st
 
@@ -33,7 +32,7 @@ MAX_INSTRUMENTS = 5
 st.set_page_config(
     page_title="Compare — Breezy F&O",
     page_icon="⚖️",
-    layout="wide",
+    layout="centered",
 )
 
 st.markdown(NAV_CSS, unsafe_allow_html=True)
@@ -113,17 +112,6 @@ def _fmt_int(v) -> str:
         return "—"
     return f"{v:,}"
 
-
-def _base_layout(height=300):
-    return dict(
-        plot_bgcolor="#161B22",
-        paper_bgcolor="#0D1117",
-        margin=dict(l=8, r=8, t=44, b=36),
-        font=dict(family="Inter, Segoe UI, sans-serif", size=12, color="#E6EDF3"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                    xanchor="left", x=0, font=dict(size=11)),
-        height=height,
-    )
 
 
 def _bs_call_price(S, K, T, r, sigma):
@@ -215,14 +203,23 @@ def _cmp_table_html(results: list[dict], strike_view: str, greeks_by_sym: dict) 
             return str(v)
         except Exception: return "—"
 
+    # Source indicator dots
+    # breeze = ICICI Breeze live feed  api = External API (yfinance/Claude)  calc = Python/BS formula
+    _SRC = {
+        "breeze": '<span style="color:#F79000;font-size:9px;vertical-align:middle;" title="Source: ICICI Breeze live feed">●</span> ',
+        "api":    '<span style="color:#BC8CFF;font-size:9px;vertical-align:middle;" title="Source: External API (yfinance)">●</span> ',
+        "calc":   '<span style="color:#3FB950;font-size:9px;vertical-align:middle;" title="Source: Computed (Python / Black-Scholes)">●</span> ',
+    }
+
     def sec(title):
         return f'<tr><td colspan="{ncols}" style="{shd}">{title}</td></tr>'
 
-    def row(metric, tip, vals_by_sym, fmt):
+    def row(metric, tip, vals_by_sym, fmt, src="calc"):
+        dot   = _SRC.get(src, "")
         tip_a = f' title="{tip}"' if tip else ""
         icon  = (' <span style="color:#8B949E;font-size:10px;cursor:help;">ⓘ</span>'
                  if tip else "")
-        r = f'<tr><td style="{mtd}"{tip_a}>{metric}{icon}</td>'
+        r = f'<tr><td style="{mtd}"{tip_a}>{dot}{metric}{icon}</td>'
         for sym in symbols:
             r += f'<td style="{td}">{_fmt(vals_by_sym.get(sym), fmt)}</td>'
         return r + "</tr>"
@@ -257,66 +254,77 @@ def _cmp_table_html(results: list[dict], strike_view: str, greeks_by_sym: dict) 
         )
     out.append('</tr></thead><tbody>')
 
+    # Source legend row
+    out.append(
+        f'<tr><td colspan="{ncols}" style="padding:4px 10px 6px;border-bottom:1px solid #21262D;">'
+        f'<span style="font-size:10px;color:#8B949E;">'
+        f'<b style="color:#C9D1D9;">Data source: </b>'
+        f'<span style="color:#F79000;">●</span> Breeze live feed &nbsp;'
+        f'<span style="color:#BC8CFF;">●</span> External API (yfinance) &nbsp;'
+        f'<span style="color:#3FB950;">●</span> Computed (Python / Black-Scholes)'
+        f'</span></td></tr>'
+    )
+
     # Position
     out.append(sec("── POSITION ──"))
-    out.append(row("CMP (₹)", "Live last traded price", {r["symbol"]: r["cmp"] for r in results}, "inr"))
-    out.append(row("Expiry",  "Option expiry date", {r["symbol"]: r["expiry_date"] for r in results}, ""))
-    out.append(row("DTE",     "Days to expiry", {r["symbol"]: r["days_to_expiry"] for r in results}, "int"))
-    out.append(row("Lot Size","Shares per F&O contract", {r["symbol"]: r["lot_size"] for r in results}, "int"))
+    out.append(row("CMP (₹)", "Live last traded price", {r["symbol"]: r["cmp"] for r in results}, "inr", "breeze"))
+    out.append(row("Expiry",  "Option expiry date", {r["symbol"]: r["expiry_date"] for r in results}, "", "breeze"))
+    out.append(row("DTE",     "Days to expiry", {r["symbol"]: r["days_to_expiry"] for r in results}, "int", "calc"))
+    out.append(row("Lot Size","Shares per F&O contract", {r["symbol"]: r["lot_size"] for r in results}, "int", "calc"))
     out.append(row("Capital Deployed (₹)", "Total capital at cost basis × shares",
-                   {r["symbol"]: r["position"]["total_cost"] for r in results}, "inr"))
+                   {r["symbol"]: r["position"]["total_cost"] for r in results}, "inr", "calc"))
     out.append(row("Cost Basis / Share (₹)", "Purchase price per share",
-                   {r["symbol"]: r["position"]["cost_basis_per_share"] for r in results}, "inr"))
+                   {r["symbol"]: r["position"]["cost_basis_per_share"] for r in results}, "inr", "calc"))
 
     # Strikes
     out.append(sec("── STRIKES ──"))
-    out.append(row("Strike (₹)",         "", {sym: sv(sym, "strike") for sym in symbols}, "inr0"))
+    out.append(row("Strike (₹)",         "", {sym: sv(sym, "strike") for sym in symbols}, "inr0", "breeze"))
     out.append(row("Moneyness %",         "(Strike − CMP) / CMP × 100",
                    {sym: (sv(sym, "strike") - r["cmp"]) / r["cmp"] * 100
                     if sv(sym, "strike") and r.get("cmp") else None
-                    for sym, r in zip(symbols, results)}, "spct1"))
+                    for sym, r in zip(symbols, results)}, "spct1", "calc"))
     out.append(row("Intrinsic Value (₹/sh)", "max(CMP − Strike, 0)",
                    {sym: max(r["cmp"] - sv(sym, "strike"), 0.0)
                     if sv(sym, "strike") and r.get("cmp") else None
-                    for sym, r in zip(symbols, results)}, "inr"))
+                    for sym, r in zip(symbols, results)}, "inr", "calc"))
     out.append(row("Time Value (₹/sh)",   "LTP − Intrinsic Value",
-                   {sym: gv(sym, "time_value") for sym in symbols}, "inr"))
+                   {sym: gv(sym, "time_value") for sym in symbols}, "inr", "calc"))
 
     # Premium & Income
     out.append(sec("── PREMIUM & INCOME ──"))
     out.append(row("Gross Premium LTP (₹/sh)", "Option LTP per share",
-                   {sym: sv(sym, "premium") for sym in symbols}, "inr"))
+                   {sym: sv(sym, "premium") for sym in symbols}, "inr", "breeze"))
     out.append(row("Net Premium / Share (₹)", "After all charges",
-                   {sym: sv(sym, "net_premium_per_share") for sym in symbols}, "inr"))
+                   {sym: sv(sym, "net_premium_per_share") for sym in symbols}, "inr", "calc"))
     out.append(row("Net Premium Total (₹)", "Full lot net premium",
-                   {sym: sv(sym, "net_premium_total") for sym in symbols}, "inr"))
+                   {sym: sv(sym, "net_premium_total") for sym in symbols}, "inr", "calc"))
     out.append(row("Charges Total (₹)", "STT + Brokerage + GST",
-                   {sym: sv(sym, "charges", "total") for sym in symbols}, "inr"))
+                   {sym: sv(sym, "charges", "total") for sym in symbols}, "inr", "calc"))
     out.append(row("Charges %", "Charges as % of gross premium",
                    {sym: (sv(sym, "charges", "total") / sv(sym, "gross_premium_total") * 100
-                          if sv(sym, "gross_premium_total") else None) for sym in symbols}, "pct1"))
+                          if sv(sym, "gross_premium_total") else None) for sym in symbols}, "pct1", "calc"))
 
     # Market Data
     out.append(sec("── MARKET DATA ──"))
-    out.append(row("IV %",           "Implied Volatility (from chain or BS-computed)",
-                   {sym: sv(sym, "_iv_enriched") or sv(sym, "iv") for sym in symbols}, "pct1"))
+    out.append(row("IV %",           "Implied Volatility (from Breeze chain or BS fallback)",
+                   {sym: sv(sym, "_iv_enriched") or sv(sym, "iv") for sym in symbols}, "pct1", "breeze"))
     out.append(row("Open Interest",  "Outstanding contracts — liquidity proxy",
-                   {sym: sv(sym, "open_interest") for sym in symbols}, "int"))
+                   {sym: sv(sym, "open_interest") for sym in symbols}, "int", "breeze"))
     out.append(row("Volume",         "Today's traded contracts",
-                   {sym: sv(sym, "volume") for sym in symbols}, "int"))
+                   {sym: sv(sym, "volume") for sym in symbols}, "int", "breeze"))
 
     # Performance
     out.append(sec("── PERFORMANCE ──"))
     out.append(row("Breakeven (₹)",          "Stock price at P&L=0",
-                   {sym: sv(sym, "breakeven") for sym in symbols}, "inr0"))
+                   {sym: sv(sym, "breakeven") for sym in symbols}, "inr0", "calc"))
     out.append(row("Downside Protection %",   "(CMP − Breakeven) / CMP",
-                   {sym: sv(sym, "downside_protection_pct") for sym in symbols}, "pct2"))
+                   {sym: sv(sym, "downside_protection_pct") for sym in symbols}, "pct2", "calc"))
     out.append(row("Premium Yield %",         "Net premium / capital deployed",
-                   {sym: sv(sym, "premium_yield_pct") for sym in symbols}, "pct2"))
+                   {sym: sv(sym, "premium_yield_pct") for sym in symbols}, "pct2", "calc"))
     out.append(row("★ Annualised Yield %",    "Yield scaled to 365 days",
-                   {sym: sv(sym, "annualised_yield_pct") for sym in symbols}, "pct1"))
+                   {sym: sv(sym, "annualised_yield_pct") for sym in symbols}, "pct1", "calc"))
     out.append(row("★ Max Profit Total (₹)",  "Best-case P&L if called away at strike",
-                   {sym: sv(sym, "max_profit_total") for sym in symbols}, "inr"))
+                   {sym: sv(sym, "max_profit_total") for sym in symbols}, "inr", "calc"))
 
     # Greeks
     out.append(sec("── GREEKS (Black-Scholes, r = 6.5%) ──"))
@@ -328,23 +336,23 @@ def _cmp_table_html(results: list[dict], strike_view: str, greeks_by_sym: dict) 
         f'</td></tr>'
     )
     out.append(row("Δ Delta",              "N(d1) call delta",
-                   {sym: gv(sym, "delta") for sym in symbols}, "f4"))
+                   {sym: gv(sym, "delta") for sym in symbols}, "f4", "calc"))
     out.append(row("Γ Gamma",              "Delta change per ₹1 CMP move",
-                   {sym: gv(sym, "gamma") for sym in symbols}, "f6"))
+                   {sym: gv(sym, "gamma") for sym in symbols}, "f6", "calc"))
     out.append(row("Θ Theta/day (₹/sh)",   "Daily time decay benefit (seller)",
-                   {sym: gv(sym, "theta_per_day") for sym in symbols}, "inr"))
+                   {sym: gv(sym, "theta_per_day") for sym in symbols}, "inr", "calc"))
     out.append(row("V Vega/+1% IV (₹/sh)", "₹ loss per +1% IV rise (seller is short vega)",
-                   {sym: gv(sym, "vega") for sym in symbols}, "inr"))
+                   {sym: gv(sym, "vega") for sym in symbols}, "inr", "calc"))
     out.append(row("ρ Rho/+1% rate (₹/sh)","₹ change per +1% risk-free rate",
-                   {sym: gv(sym, "rho") for sym in symbols}, "inr"))
+                   {sym: gv(sym, "rho") for sym in symbols}, "inr", "calc"))
 
     # Put-Call Summary
     out.append(sec("── PUT-CALL SUMMARY ──"))
     out.append(row("Implied Put Price (₹/sh)", "From Put-Call Parity: P = C + K·e^(−rT) − S",
-                   {sym: gv(sym, "implied_put") for sym in symbols}, "inr"))
+                   {sym: gv(sym, "implied_put") for sym in symbols}, "inr", "calc"))
     out.append(row("Put Delta (approx.)",      "Δ − 1 (from parity)",
                    {sym: ((gv(sym, "delta") or 0) - 1.0) if gv(sym, "delta") is not None else None
-                    for sym in symbols}, "f4"))
+                    for sym in symbols}, "f4", "calc"))
 
     out.append('</tbody></table></div>')
     return "".join(out)
@@ -599,8 +607,6 @@ if st.session_state.cmp_results:
     st.markdown('<div class="section-hd">Strike Detail per Instrument</div>',
                 unsafe_allow_html=True)
 
-    line_colors = ["#58A6FF", "#20A4A0", "#FF7B7B", "#FFD166", "#39D0C8"]
-
     for i, r in enumerate(enriched_results):
         with st.expander(
             f"{r['symbol']} — CMP ₹{r['cmp']:,.0f} · {r['days_to_expiry']}d · "
@@ -704,35 +710,6 @@ if st.session_state.cmp_results:
             tbl.append(row2("Implied Put (₹/sh)", {t: _gv2(t, "implied_put") for t in types}, "inr"))
             tbl.append('</tbody></table></div>')
             st.markdown("".join(tbl), unsafe_allow_html=True)
-
-    # ── P&L Payoff chart (shown last) ─────────────────────────────────────────
-    st.divider()
-    st.markdown('<div class="section-hd">P&amp;L at Expiry — ATM Strikes</div>',
-                unsafe_allow_html=True)
-    st.caption("ATM P&L curves for cross-instrument comparison.")
-
-    payoff_fig = go.Figure()
-    for i, r in enumerate(enriched_results):
-        atm = _get_strike(r, "ATM")
-        if not atm or not atm.get("payoff"):
-            continue
-        xs = [p["price"] for p in atm["payoff"]]
-        ys = [p["pl"]    for p in atm["payoff"]]
-        payoff_fig.add_trace(go.Scatter(
-            name=f"{r['symbol']} ATM ₹{atm['strike']:,.0f}",
-            x=xs, y=ys,
-            mode="lines+markers",
-            line=dict(color=line_colors[i % len(line_colors)], width=2),
-            marker=dict(size=4),
-        ))
-    payoff_fig.add_hline(y=0, line_width=1, line_dash="dot", line_color="#8B949E")
-    payoff_fig.update_layout(
-        **_base_layout(height=320),
-        title=dict(text="P&L at Expiry (ATM Strikes)", font=dict(size=14)),
-        xaxis=dict(title="Stock price at expiry (₹)", showgrid=False, zeroline=False),
-        yaxis=dict(title="P&L (₹)", showgrid=True, gridcolor=GRID_COLOR, zeroline=False),
-    )
-    st.plotly_chart(payoff_fig, use_container_width=True, config={"displayModeBar": False})
 
 else:
     st.markdown(

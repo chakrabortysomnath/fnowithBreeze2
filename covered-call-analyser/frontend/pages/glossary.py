@@ -1,8 +1,13 @@
 """
 pages/glossary.py — Ready Reckoner: definitions of every key term in Breezy F&O.
+
+Term data is stored in frontend/glossary_terms.json so it can be updated
+without touching Python code.
 """
 
+import json
 import os
+import pathlib
 import sys
 
 import streamlit as st
@@ -29,9 +34,22 @@ st.markdown("""
 </div>
 <p style="color:#8B949E; font-size:13px; margin-bottom:18px;">
   Plain-English definitions for every term, metric and abbreviation used in this app.
-  Use the search box below or jump to a section.
+  Use the search box below or browse by section.
 </p>
 """, unsafe_allow_html=True)
+
+# ── Load terms from JSON ───────────────────────────────────────────────────────
+
+_TERMS_PATH = pathlib.Path(__file__).parent.parent / "glossary_terms.json"
+
+try:
+    SECTIONS = json.loads(_TERMS_PATH.read_text(encoding="utf-8"))
+except FileNotFoundError:
+    st.error(f"glossary_terms.json not found at {_TERMS_PATH}.")
+    st.stop()
+except json.JSONDecodeError as exc:
+    st.error(f"glossary_terms.json is malformed: {exc}")
+    st.stop()
 
 # ── Search ─────────────────────────────────────────────────────────────────────
 
@@ -488,17 +506,19 @@ SECTIONS = [
 
 # ── Render ─────────────────────────────────────────────────────────────────────
 
-def _matches(term: str, definition: str) -> bool:
-    if not query:
-        return True
-    q = query.lower()
-    return q in term.lower() or q in definition.lower()
-
-
 total_shown = 0
 
-for section_title, emoji, terms in SECTIONS:
-    visible = [(t, d) for t, d in terms if _matches(t, d)]
+for section in SECTIONS:
+    section_title = section["section"]
+    emoji         = section.get("emoji", "")
+    terms         = section.get("terms", [])
+
+    visible = [
+        t for t in terms
+        if not query
+        or query in t["term"].lower()
+        or query in t["definition"].lower()
+    ]
     if not visible:
         continue
 
@@ -507,12 +527,12 @@ for section_title, emoji, terms in SECTIONS:
         unsafe_allow_html=True,
     )
 
-    for term, definition in visible:
-        with st.expander(term):
-            st.markdown(definition)
+    for entry in visible:
+        with st.expander(entry["term"]):
+            st.markdown(entry["definition"])
         total_shown += 1
 
 if total_shown == 0:
-    st.info(f"No terms matched **\"{query}\"**. Try a shorter or different keyword.")
+    st.info(f'No terms matched **"{query}"**. Try a shorter or different keyword.')
 else:
     st.caption(f"Showing {total_shown} term{'s' if total_shown != 1 else ''}.")
