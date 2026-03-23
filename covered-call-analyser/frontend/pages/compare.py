@@ -15,7 +15,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-from nav import NAV_CSS, nav_bar
+from nav import NAV_CSS, brand_header, nav_bar
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000").rstrip("/")
 
@@ -38,22 +38,13 @@ st.set_page_config(
 
 st.markdown(NAV_CSS, unsafe_allow_html=True)
 nav_bar("compare")
-
-# ── Brand header ──────────────────────────────────────────────────────────────
-
-st.markdown("""
-<div style="display:flex; align-items:center; gap:12px; margin-bottom:4px;">
-  <span style="font-size:36px; line-height:1;">⚖️</span>
-  <span style="font-size:32px; font-weight:900; color:#58A6FF;
-               letter-spacing:-1px; font-family:'Segoe UI',Inter,sans-serif;">
-    Instrument Comparison
-  </span>
-</div>
-<p style="color:#8B949E; font-size:13px; margin-bottom:18px;">
-  Select 2–5 F&amp;O instruments to compare covered call metrics side-by-side.
-  Analysis uses the nearest expiry for each instrument. Claude AI ranks the instruments.
-</p>
-""", unsafe_allow_html=True)
+brand_header(
+    "⚖️", "Instrument Comparison",
+    subtitle=(
+        "Select 2–5 F&amp;O instruments to compare covered call metrics side-by-side. "
+        "Analysis uses the nearest expiry for each instrument. Claude AI ranks the instruments."
+    ),
+)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

@@ -13,7 +13,7 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
-from nav import NAV_CSS, nav_bar
+from nav import NAV_CSS, brand_header, nav_bar
 
 # ── Static equity metadata (sector / industry lookup) ─────────────────────────
 import json as _json
@@ -70,18 +70,7 @@ st.set_page_config(
 
 st.markdown(NAV_CSS, unsafe_allow_html=True)
 nav_bar("analyse")
-
-# ── Brand header ──────────────────────────────────────────────────────────────
-
-st.markdown("""
-<div style="display:flex; align-items:center; gap:14px; margin-bottom:8px;">
-  <span style="font-size:44px; line-height:1;">🤏</span>
-  <span style="font-size:36px; font-weight:900; color:#58A6FF;
-               letter-spacing:-1px; font-family:'Segoe UI',Inter,sans-serif;">
-    Breezy F&amp;O
-  </span>
-</div>
-""", unsafe_allow_html=True)
+brand_header()
 
 # ── Backend health ────────────────────────────────────────────────────────────
 
