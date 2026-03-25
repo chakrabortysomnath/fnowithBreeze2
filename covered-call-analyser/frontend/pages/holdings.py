@@ -32,7 +32,7 @@ brand_header(
 # ── Data fetcher ──────────────────────────────────────────────────────────────
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)   # 5 min — Breeze rate-limits frequent calls
 def _fetch_holdings() -> dict:
     r = requests.get(f"{BACKEND_URL}/holdings", timeout=30)
     r.raise_for_status()
@@ -156,7 +156,13 @@ except requests.HTTPError as exc:
         detail = exc.response.json().get("detail", exc.response.text[:200])
     except Exception:
         detail = exc.response.text[:200]
-    st.error(f"Backend error {exc.response.status_code}: {detail}")
+    if exc.response.status_code == 429:
+        st.warning(
+            "⏳ Breeze API rate limit reached — too many requests in a short window. "
+            "Please wait 60 seconds and then click **🔄 Refresh**."
+        )
+    else:
+        st.error(f"Backend error {exc.response.status_code}: {detail}")
     st.stop()
 except Exception as exc:
     st.error(f"Failed to fetch holdings: {exc}")
