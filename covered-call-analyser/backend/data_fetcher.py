@@ -663,62 +663,108 @@ def _safe_float(v) -> float:
 def get_holdings() -> dict:
     """Fetch the full portfolio holdings from Breeze.
 
-    Returns a dict with two lists:
-      equity       — list of HoldingItem-compatible dicts for equity holdings
-      mutual_funds — list of HoldingItem-compatible dicts for MF holdings
+    Strategy:
+      1. get_demat_holdings()  — primary equity list; fields: stock_code,
+         stock_ISIN, quantity.  No price data.
+      2. get_portfolio_holdings(exchange_code="NSE") — price/cost data;
+         fields: stock_code, average_price, current_market_price,
+         unrealized_profit, change_percentage, open_position_value,
+         product_type, exchange_code.
+      3. Merge 1+2 on stock_code so each row has ISIN + price/P&L.
+      4. Mutual funds: detected by product_type or exchange_code containing
+         "MF"/"MUTUAL"/"FUND" in the portfolio holdings response.
 
-    Breeze `get_portfolio_holdings()` returns a flat list of all instruments.
-    We split them by product_type: anything with "MF"/"MUTUAL"/"FUND" goes
-    to mutual_funds; everything else goes to equity.
-
-    P&L and current value are computed locally when Breeze omits them.
+    Returns {"equity": [...], "mutual_funds": [...]}
     """
     breeze = get_session()
     logger.info("Fetching portfolio holdings from Breeze")
 
+    # ── Step 1: demat holdings (ISIN + quantity) ──────────────────────────
+    demat_by_code: dict[str, dict] = {}
     try:
-        resp = breeze.get_portfolio_holdings()
+        demat_resp = breeze.get_demat_holdings()
+        for d in (demat_resp.get("Success") or []):
+            code = (d.get("stock_code") or "").strip().upper()
+            if code:
+                demat_by_code[code] = {
+                    "isin": (d.get("stock_ISIN") or "").strip(),
+                    "demat_qty": _safe_float(d.get("quantity")),
+                }
+        logger.info(f"Demat holdings: {len(demat_by_code)} symbols")
     except Exception as exc:
-        logger.error(f"Breeze get_portfolio_holdings failed: {exc}")
-        raise RuntimeError(f"Failed to fetch holdings from Breeze: {exc}") from exc
+        logger.warning(f"get_demat_holdings failed (will continue without ISIN): {exc}")
 
-    rows = resp.get("Success") or []
-    logger.info(f"Breeze holdings: {len(rows)} rows returned")
+    # ── Step 2: portfolio holdings (price / cost / P&L) ───────────────────
+    portfolio_rows: list[dict] = []
+    # Try NSE equity first; fall back to no filter (which may include F&O)
+    for exc_code in ["NSE", "BSE", ""]:
+        try:
+            p_resp = breeze.get_portfolio_holdings(exchange_code=exc_code)
+            rows = p_resp.get("Success") or []
+            logger.info(
+                f"get_portfolio_holdings(exchange_code={exc_code!r}): {len(rows)} rows"
+            )
+            if rows:
+                portfolio_rows = rows
+                break
+        except Exception as e:
+            logger.warning(
+                f"get_portfolio_holdings(exchange_code={exc_code!r}) failed: {e}"
+            )
 
-    equity: list[dict] = []
-    mutual_funds: list[dict] = []
+    # ── Step 3: if portfolio call returned nothing, build from demat only ──
+    if not portfolio_rows:
+        logger.warning(
+            "No portfolio_holdings data from Breeze. "
+            "Showing demat holdings without price/P&L."
+        )
+        equity: list[dict] = []
+        for code, d in demat_by_code.items():
+            equity.append({
+                "name":      code,
+                "symbol":    code,
+                "isin":      d["isin"],
+                "quantity":  d["demat_qty"],
+                "avg_cost":  0.0,
+                "cmp":       0.0,
+                "cur_value": 0.0,
+                "pnl":       0.0,
+                "pnl_pct":   0.0,
+            })
+        return {"equity": equity, "mutual_funds": []}
 
-    for h in rows:
-        qty      = _safe_float(h.get("quantity") or h.get("total_quantity"))
-        avg_cost = _safe_float(
-            h.get("average_price") or h.get("average_cost") or h.get("buy_price")
-        )
-        cmp_val  = _safe_float(
-            h.get("current_price") or h.get("last_traded_price") or h.get("ltp")
-        )
-        cur_val  = _safe_float(
-            h.get("market_value") or h.get("current_market_value")
-        )
-        # Compute current value when Breeze doesn't return it
+    # ── Step 4: parse and merge ────────────────────────────────────────────
+    equity   = []
+    mf: list[dict] = []
+
+    for h in portfolio_rows:
+        stock_code = (h.get("stock_code") or "").strip().upper()
+        demat_info = demat_by_code.get(stock_code, {})
+
+        qty      = _safe_float(h.get("quantity"))
+        avg_cost = _safe_float(h.get("average_price"))
+        # Correct Breeze field name for current market price
+        cmp_val  = _safe_float(h.get("current_market_price"))
+        cur_val  = _safe_float(h.get("open_position_value"))
         if cur_val == 0.0 and qty and cmp_val:
             cur_val = qty * cmp_val
 
-        pnl = _safe_float(h.get("pnl") or h.get("total_pnl"))
-        # Compute P&L when Breeze doesn't return it
+        # Breeze returns unrealized_profit for open positions
+        pnl = _safe_float(
+            h.get("unrealized_profit") or h.get("booked_profit_loss")
+        )
         if pnl == 0.0 and avg_cost and qty:
             pnl = cur_val - avg_cost * qty
 
-        pnl_pct = _safe_float(
-            h.get("pnl_percentage") or h.get("total_pnl_percentage")
-        )
+        pnl_pct = _safe_float(h.get("change_percentage"))
         if pnl_pct == 0.0 and avg_cost and qty:
             cost = avg_cost * qty
             pnl_pct = (pnl / cost * 100) if cost else 0.0
 
         item = {
-            "name":      (h.get("stock_name") or h.get("short_name") or h.get("stock_code") or "").strip(),
-            "symbol":    (h.get("stock_code") or "").strip().upper(),
-            "isin":      (h.get("isin_code") or h.get("isin") or "").strip(),
+            "name":      stock_code,
+            "symbol":    stock_code,
+            "isin":      demat_info.get("isin", ""),
             "quantity":  qty,
             "avg_cost":  avg_cost,
             "cmp":       cmp_val,
@@ -727,13 +773,15 @@ def get_holdings() -> dict:
             "pnl_pct":   pnl_pct,
         }
 
-        product = (h.get("product_type") or h.get("action") or "").upper()
-        if any(kw in product for kw in ("MF", "MUTUAL", "FUND")):
-            mutual_funds.append(item)
+        product = (h.get("product_type") or "").upper()
+        exc     = (h.get("exchange_code") or "").upper()
+        if any(kw in product for kw in ("MF", "MUTUAL", "FUND")) or \
+           any(kw in exc     for kw in ("MF", "MUTUAL", "FUND")):
+            mf.append(item)
         else:
             equity.append(item)
 
     logger.info(
-        f"Holdings parsed: {len(equity)} equity, {len(mutual_funds)} mutual fund rows"
+        f"Holdings parsed: {len(equity)} equity, {len(mf)} mutual fund rows"
     )
-    return {"equity": equity, "mutual_funds": mutual_funds}
+    return {"equity": equity, "mutual_funds": mf}
