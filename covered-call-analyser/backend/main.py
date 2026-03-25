@@ -40,6 +40,7 @@ from .data_fetcher import (
     get_option_quote,
     get_all_lot_sizes, get_all_nse_symbols, upsert_lot_size, delete_lot_size,
     upsert_nse_symbol, delete_nse_symbol,
+    get_holdings,
 )
 from .models import (
     HealthResponse, QuoteResponse,
@@ -52,6 +53,7 @@ from .models import (
     CompareRequest,
     UpsertNseSymbolRequest, NseSymbolResponse, NseSymbolTableResponse,
     UpsertEquityMetaRequest, EquityMetaResponse, EquityMetaTableResponse,
+    HoldingsResponse,
 )
 
 # Path to the equity metadata JSON file (kept in frontend directory)
@@ -937,6 +939,33 @@ def refresh_session_endpoint(req: RefreshSessionRequest) -> RefreshSessionRespon
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Holdings
+# ---------------------------------------------------------------------------
+
+@app.get("/holdings", response_model=HoldingsResponse, tags=["holdings"])
+def get_holdings_endpoint() -> HoldingsResponse:
+    """Return the full portfolio holdings split into equity and mutual funds.
+
+    Fetches live data from Breeze `get_portfolio_holdings()` and normalises
+    the response into a consistent structure.  P&L and current value are
+    computed locally when Breeze omits them.
+    """
+    try:
+        data = get_holdings()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"Unexpected error in /holdings: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return HoldingsResponse(
+        equity=data["equity"],
+        mutual_funds=data["mutual_funds"],
+        timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+
 # Root redirect → docs
 # ---------------------------------------------------------------------------
 

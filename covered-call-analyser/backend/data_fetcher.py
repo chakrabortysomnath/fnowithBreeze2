@@ -644,3 +644,96 @@ def get_option_quote(symbol: str, expiry_date: str, strike: float) -> dict:
         f"Vol={result['volume']}"
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Holdings — equity and mutual fund portfolio
+# ---------------------------------------------------------------------------
+
+def _safe_float(v) -> float:
+    """Coerce a Breeze field value to float, returning 0.0 on failure."""
+    if v in (None, "", "NA", "N/A", "-"):
+        return 0.0
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def get_holdings() -> dict:
+    """Fetch the full portfolio holdings from Breeze.
+
+    Returns a dict with two lists:
+      equity       — list of HoldingItem-compatible dicts for equity holdings
+      mutual_funds — list of HoldingItem-compatible dicts for MF holdings
+
+    Breeze `get_portfolio_holdings()` returns a flat list of all instruments.
+    We split them by product_type: anything with "MF"/"MUTUAL"/"FUND" goes
+    to mutual_funds; everything else goes to equity.
+
+    P&L and current value are computed locally when Breeze omits them.
+    """
+    breeze = get_session()
+    logger.info("Fetching portfolio holdings from Breeze")
+
+    try:
+        resp = breeze.get_portfolio_holdings()
+    except Exception as exc:
+        logger.error(f"Breeze get_portfolio_holdings failed: {exc}")
+        raise RuntimeError(f"Failed to fetch holdings from Breeze: {exc}") from exc
+
+    rows = resp.get("Success") or []
+    logger.info(f"Breeze holdings: {len(rows)} rows returned")
+
+    equity: list[dict] = []
+    mutual_funds: list[dict] = []
+
+    for h in rows:
+        qty      = _safe_float(h.get("quantity") or h.get("total_quantity"))
+        avg_cost = _safe_float(
+            h.get("average_price") or h.get("average_cost") or h.get("buy_price")
+        )
+        cmp_val  = _safe_float(
+            h.get("current_price") or h.get("last_traded_price") or h.get("ltp")
+        )
+        cur_val  = _safe_float(
+            h.get("market_value") or h.get("current_market_value")
+        )
+        # Compute current value when Breeze doesn't return it
+        if cur_val == 0.0 and qty and cmp_val:
+            cur_val = qty * cmp_val
+
+        pnl = _safe_float(h.get("pnl") or h.get("total_pnl"))
+        # Compute P&L when Breeze doesn't return it
+        if pnl == 0.0 and avg_cost and qty:
+            pnl = cur_val - avg_cost * qty
+
+        pnl_pct = _safe_float(
+            h.get("pnl_percentage") or h.get("total_pnl_percentage")
+        )
+        if pnl_pct == 0.0 and avg_cost and qty:
+            cost = avg_cost * qty
+            pnl_pct = (pnl / cost * 100) if cost else 0.0
+
+        item = {
+            "name":      (h.get("stock_name") or h.get("short_name") or h.get("stock_code") or "").strip(),
+            "symbol":    (h.get("stock_code") or "").strip().upper(),
+            "isin":      (h.get("isin_code") or h.get("isin") or "").strip(),
+            "quantity":  qty,
+            "avg_cost":  avg_cost,
+            "cmp":       cmp_val,
+            "cur_value": cur_val,
+            "pnl":       pnl,
+            "pnl_pct":   pnl_pct,
+        }
+
+        product = (h.get("product_type") or h.get("action") or "").upper()
+        if any(kw in product for kw in ("MF", "MUTUAL", "FUND")):
+            mutual_funds.append(item)
+        else:
+            equity.append(item)
+
+    logger.info(
+        f"Holdings parsed: {len(equity)} equity, {len(mutual_funds)} mutual fund rows"
+    )
+    return {"equity": equity, "mutual_funds": mutual_funds}

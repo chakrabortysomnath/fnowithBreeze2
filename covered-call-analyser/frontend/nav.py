@@ -129,12 +129,13 @@ def brand_header(
 def nav_bar(active: str) -> None:
     """Render the top navigation bar.
 
-    active: 'analyse' | 'compare' | 'config' | 'glossary'
+    active: 'analyse' | 'compare' | 'holdings' | 'config' | 'glossary'
     """
     pages = [
-        ("🔍 Analyse",       "/",         "analyse"),
-        ("⚖️ Compare",       "/compare",  "compare"),
-        ("⚙️ Config",        "/config",   "config"),
+        ("🔍 Analyse",       "/",          "analyse"),
+        ("⚖️ Compare",       "/compare",   "compare"),
+        ("💼 Holdings",      "/holdings",  "holdings"),
+        ("⚙️ Config",        "/config",    "config"),
         ("📖 Ready Reckoner", "/glossary", "glossary"),
     ]
     links = "\n".join(
