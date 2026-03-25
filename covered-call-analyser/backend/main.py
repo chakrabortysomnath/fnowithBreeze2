@@ -954,7 +954,11 @@ def get_holdings_endpoint() -> HoldingsResponse:
     try:
         data = get_holdings()
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+        msg = str(exc)
+        # Propagate Breeze rate-limit as HTTP 429 so the frontend can show
+        # a clear message instead of a generic error.
+        status = 429 if "429" in msg else 503
+        raise HTTPException(status_code=status, detail=msg)
     except Exception as exc:
         logger.error(f"Unexpected error in /holdings: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
