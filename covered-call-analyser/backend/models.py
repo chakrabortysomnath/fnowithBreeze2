@@ -377,6 +377,32 @@ class EquityMetaTableResponse(BaseModel):
     count: int
 
 
+# ---------------------------------------------------------------------------
+# Holdings
+# ---------------------------------------------------------------------------
+
+class HoldingItem(BaseModel):
+    """One row in the portfolio holdings table."""
+
+    name: str = Field(description="Full instrument name.")
+    symbol: str = Field(description="Breeze/exchange stock code.")
+    isin: str = Field(description="ISIN code.")
+    quantity: float = Field(description="Shares / units held.")
+    avg_cost: float = Field(description="Average cost price per unit (INR).")
+    cmp: float = Field(description="Current market price per unit (INR).")
+    cur_value: float = Field(description="Current market value (INR).")
+    pnl: float = Field(description="Absolute P&L (INR).")
+    pnl_pct: float = Field(description="P&L as a percentage of cost.")
+
+
+class HoldingsResponse(BaseModel):
+    """Response model for GET /holdings."""
+
+    equity: list[HoldingItem] = Field(description="Equity holdings.")
+    mutual_funds: list[HoldingItem] = Field(description="Mutual fund holdings.")
+    timestamp: str = Field(description="UTC fetch timestamp (ISO 8601).")
+
+
 class WatchlistResultItem(BaseModel):
     """Analysis outcome for one symbol in a watchlist run."""
 
