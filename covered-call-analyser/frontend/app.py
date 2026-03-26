@@ -183,10 +183,24 @@ def _fetch_holdings() -> dict:
 
 
 def _find_holding(symbol: str, equity: list[dict]) -> dict | None:
-    """Return the holding row whose symbol matches (case-insensitive), or None."""
+    """Return the holding row matching the F&O symbol, or None.
+
+    Match order:
+      1. Exact case-insensitive match on holding's symbol field.
+      2. NSE Symbol Mapping (Config page): if nse_map[breeze_code] == fo_symbol,
+         the holding's breeze_code is treated as equivalent to the F&O symbol.
+         Add entries like HDFBAN → HDFCBANK in Config → NSE Symbol Mapping.
+    """
     sym = symbol.upper()
+    # Pass 1: exact match
     for h in equity:
         if (h.get("symbol") or "").upper() == sym:
+            return h
+    # Pass 2: config-driven mapping (breeze_code → fo_symbol via nse_symbols)
+    nse_map = _fetch_nse_symbol_map()  # fo_code → nse_ticker, reused for breeze→fo
+    for h in equity:
+        breeze_code = (h.get("symbol") or "").upper()
+        if nse_map.get(breeze_code, "").upper() == sym:
             return h
     return None
 
