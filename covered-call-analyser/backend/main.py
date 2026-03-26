@@ -970,6 +970,35 @@ def get_holdings_endpoint() -> HoldingsResponse:
     )
 
 
+@app.get("/holdings/debug", tags=["holdings"])
+def get_holdings_debug() -> dict:
+    """Return raw Breeze API responses for debugging holdings data mapping."""
+    from .breeze_client import get_session
+    breeze = get_session()
+    today = datetime.now(timezone.utc)
+    from_dt = f"{today.year}-01-01T06:00:00.000Z"
+    to_dt = today.strftime("%Y-%m-%dT23:59:59.000Z")
+
+    demat_resp = breeze.get_demat_holdings()
+    portfolio_resp = breeze.get_portfolio_holdings(from_date=from_dt, to_date=to_dt)
+
+    demat_rows = demat_resp.get("Success") or []
+    portfolio_rows = portfolio_resp.get("Success") or []
+
+    return {
+        "demat_status": demat_resp.get("Status"),
+        "demat_error": demat_resp.get("Error"),
+        "demat_count": len(demat_rows),
+        "demat_sample": demat_rows[:3],
+        "portfolio_status": portfolio_resp.get("Status"),
+        "portfolio_error": portfolio_resp.get("Error"),
+        "portfolio_count": len(portfolio_rows),
+        "portfolio_sample": portfolio_rows[:3],
+        "portfolio_from": from_dt,
+        "portfolio_to": to_dt,
+    }
+
+
 # Root redirect → docs
 # ---------------------------------------------------------------------------
 

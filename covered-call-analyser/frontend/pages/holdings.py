@@ -175,8 +175,7 @@ ts     = data.get("timestamp", "")
 with col_ts:
     if ts:
         st.caption(
-            f"Fetched at {ts[:19].replace('T', ' ')} UTC · "
-            f"auto-refreshes every 60 s · source: ICICI Breeze"
+            f"Fetched at {ts[:19].replace('T', ' ')} UTC · source: ICICI Breeze"
         )
 
 # ── Equity ────────────────────────────────────────────────────────────────────
