@@ -735,21 +735,36 @@ def get_holdings() -> dict:
     except Exception as exc:
         logger.warning(f"get_portfolio_holdings(NSE) failed (prices unavailable): {exc}")
 
-    # Step 2b: MF holdings via MFO exchange
-    try:
-        mf_resp = breeze.get_portfolio_holdings(
-            exchange_code="MFO",
-            from_date=from_dt,
-            to_date=to_dt,
-        )
-        _check_rate_limit(mf_resp, "get_portfolio_holdings(MFO)")
-        for h in (mf_resp.get("Success") or []):
-            mf_rows.append(h)
-        logger.info(f"Portfolio MFO: {len(mf_rows)} MF rows")
-    except RuntimeError:
-        raise
-    except Exception as exc:
-        logger.warning(f"get_portfolio_holdings(MFO) failed: {exc}")
+    # Step 2b: MF holdings — try MFO then BSE (ICICI MFs may sit on either)
+    _mf_found = False
+    for _mf_exc in ("MFO", "BSE"):
+        try:
+            mf_resp = breeze.get_portfolio_holdings(
+                exchange_code=_mf_exc,
+                from_date=from_dt,
+                to_date=to_dt,
+            )
+            _check_rate_limit(mf_resp, f"get_portfolio_holdings({_mf_exc})")
+            status = mf_resp.get("Status")
+            rows   = mf_resp.get("Success") or []
+            if status != 200 or not rows:
+                logger.info(f"Portfolio {_mf_exc}: no rows (status={status}), trying next")
+                continue
+            for h in rows:
+                product = (h.get("product_type") or "").upper()
+                exc_c   = (h.get("exchange_code") or _mf_exc).upper()
+                # On BSE, filter to MF product types only (BSE also has equity)
+                if _mf_exc == "BSE":
+                    if not any(kw in product for kw in ("MF", "MUTUAL", "FUND")):
+                        continue
+                mf_rows.append(h)
+            logger.info(f"Portfolio {_mf_exc}: {len(mf_rows)} MF rows")
+            _mf_found = True
+            break
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.warning(f"get_portfolio_holdings({_mf_exc}) failed: {exc}")
 
     # ── Step 3: build equity rows (demat is the master list) ─────────────
     equity: list[dict] = []

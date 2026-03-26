@@ -96,11 +96,14 @@ if PING_URL:
 # ── Session state ─────────────────────────────────────────────────────────────
 
 for key, default in [
-    ("expiries",      []),
-    ("symbol_loaded", ""),
-    ("result",        None),
-    ("last_qty_held", 0),
-    ("bypass_intel",  os.environ.get("CLAUDE_INTEL_BYPASS", "").lower() == "true"),
+    ("expiries",        []),
+    ("symbol_loaded",   ""),
+    ("result",          None),
+    ("last_qty_held",   0),
+    ("bypass_intel",    os.environ.get("CLAUDE_INTEL_BYPASS", "").lower() == "true"),
+    ("_holding_found",  False),
+    ("_qty_held_val",   250),
+    ("_avg_price_val",  0.0),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -166,6 +169,40 @@ def _fetch_symbols() -> list[str]:
         return sorted(r.json()["lot_sizes"].keys())
     except Exception:
         return []
+
+
+@st.cache_data(ttl=300)
+def _fetch_holdings() -> dict:
+    """Fetch portfolio holdings from backend (cached 5 min). Returns empty on failure."""
+    try:
+        r = requests.get(f"{BACKEND_URL}/holdings", timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return {"equity": [], "mutual_funds": []}
+
+
+def _find_holding(symbol: str, equity: list[dict]) -> dict | None:
+    """Return the holding row matching the F&O symbol, or None.
+
+    Match order:
+      1. Exact case-insensitive match on holding's symbol field.
+      2. NSE Symbol Mapping (Config page): if nse_map[breeze_code] == fo_symbol,
+         the holding's breeze_code is treated as equivalent to the F&O symbol.
+         Add entries like HDFBAN → HDFCBANK in Config → NSE Symbol Mapping.
+    """
+    sym = symbol.upper()
+    # Pass 1: exact match
+    for h in equity:
+        if (h.get("symbol") or "").upper() == sym:
+            return h
+    # Pass 2: config-driven mapping (breeze_code → fo_symbol via nse_symbols)
+    nse_map = _fetch_nse_symbol_map()  # fo_code → nse_ticker, reused for breeze→fo
+    for h in equity:
+        breeze_code = (h.get("symbol") or "").upper()
+        if nse_map.get(breeze_code, "").upper() == sym:
+            return h
+    return None
 
 
 def _fetch_expiries(symbol: str) -> list[str]:
@@ -1264,6 +1301,15 @@ if symbol and symbol != st.session_state.symbol_loaded:
         st.session_state.result        = None
     except Exception as exc:
         st.error(f"Could not load expiries for {symbol}: {exc}")
+    # Prefill holding qty and avg cost from portfolio
+    try:
+        hdata = _fetch_holdings()
+        held  = _find_holding(symbol, hdata.get("equity", []))
+        st.session_state._holding_found = held is not None
+        st.session_state._qty_held_val  = int(float(held["quantity"])) if held else 250
+        st.session_state._avg_price_val = float(held["avg_cost"]) if held else 0.0
+    except Exception:
+        st.session_state._holding_found = False
 
 if not symbols:
     st.caption("⚠ Could not load symbol list — backend may be unreachable.")
@@ -1285,17 +1331,27 @@ else:
 # Section 3: Configuration
 st.subheader("Configuration")
 
-configure_holdings = st.checkbox("Configure: Holdings")
+if st.session_state._holding_found:
+    _h_qty = st.session_state._qty_held_val
+    _h_avg = st.session_state._avg_price_val
+    st.info(f"💼 Holding found: {_h_qty:,} shares @ ₹{_h_avg:,.2f} avg cost")
+
+configure_holdings = st.checkbox(
+    "Configure: Holdings",
+    value=bool(st.session_state._holding_found),
+)
 
 qty_held  = 0
 avg_price = 0.0
 if configure_holdings:
     q_col, p_col = st.columns(2)
     with q_col:
-        qty_held = st.number_input("Shares held", min_value=0, step=1, value=250)
+        qty_held = st.number_input(
+            "Shares held", min_value=0, step=1, key="_qty_held_val",
+        )
     with p_col:
         avg_price = st.number_input(
-            "Avg purchase price (₹)", min_value=0.0, step=0.5, value=0.0,
+            "Avg purchase price (₹)", min_value=0.0, step=0.5, key="_avg_price_val",
             help="Leave 0 to use live CMP as cost basis.",
         )
 
