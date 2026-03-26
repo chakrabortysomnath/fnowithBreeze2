@@ -720,27 +720,36 @@ def get_holdings() -> dict:
     to_dt   = today.strftime("%Y-%m-%dT23:59:59.000Z")
     try:
         p_resp = breeze.get_portfolio_holdings(
+            exchange_code="NSE",
             from_date=from_dt,
             to_date=to_dt,
         )
-        _check_rate_limit(p_resp, "get_portfolio_holdings")
+        _check_rate_limit(p_resp, "get_portfolio_holdings(NSE)")
         for h in (p_resp.get("Success") or []):
-            code    = (h.get("stock_code") or "").strip().upper()
-            product = (h.get("product_type") or "").upper()
-            exc_c   = (h.get("exchange_code") or "").upper()
-            is_mf   = any(kw in product for kw in ("MF", "MUTUAL", "FUND")) or \
-                      any(kw in exc_c   for kw in ("MF", "MUTUAL", "FUND"))
-            if is_mf:
-                mf_rows.append(h)
-            elif code:
+            code = (h.get("stock_code") or "").strip().upper()
+            if code:
                 portfolio_by_code[code] = h
-        logger.info(
-            f"Portfolio: {len(portfolio_by_code)} equity rows, {len(mf_rows)} MF rows"
-        )
+        logger.info(f"Portfolio NSE: {len(portfolio_by_code)} equity rows")
     except RuntimeError:
         raise
     except Exception as exc:
-        logger.warning(f"get_portfolio_holdings failed (prices unavailable): {exc}")
+        logger.warning(f"get_portfolio_holdings(NSE) failed (prices unavailable): {exc}")
+
+    # Step 2b: MF holdings via MFO exchange
+    try:
+        mf_resp = breeze.get_portfolio_holdings(
+            exchange_code="MFO",
+            from_date=from_dt,
+            to_date=to_dt,
+        )
+        _check_rate_limit(mf_resp, "get_portfolio_holdings(MFO)")
+        for h in (mf_resp.get("Success") or []):
+            mf_rows.append(h)
+        logger.info(f"Portfolio MFO: {len(mf_rows)} MF rows")
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        logger.warning(f"get_portfolio_holdings(MFO) failed: {exc}")
 
     # ── Step 3: build equity rows (demat is the master list) ─────────────
     equity: list[dict] = []
