@@ -82,6 +82,17 @@ def get_session_for(api_key: str, api_secret: str, session_token: str) -> Breeze
         logger.info("User Breeze session ready for api_key=%s***", api_key[:6])
         return breeze
     except Exception as exc:
+        exc_str = str(exc).lower()
+        if any(kw in exc_str for kw in ("too many", "rate", "429", "limit")):
+            # Breeze rate-limits generate_session; the session_token was already
+            # registered in a prior call — cache and proceed so API calls still work.
+            logger.warning(
+                "Breeze rate-limited generate_session for api_key=%s***; "
+                "using existing registration.", api_key[:6]
+            )
+            with _user_sessions_lock:
+                _user_sessions[cache_key] = breeze
+            return breeze
         raise RuntimeError(f"Breeze authentication failed: {exc}") from exc
 
 
