@@ -18,6 +18,7 @@ Static IP Proxy (Phase 5):
 
 import logging
 import os
+import threading
 from typing import Optional
 
 from breeze_connect import BreezeConnect
@@ -26,20 +27,62 @@ from .config import settings
 
 logger = logging.getLogger(__name__)
 
-# Module-level singleton — one session shared across all requests
+# Module-level singleton — one session shared across all requests (env-var mode)
 _session: Optional[BreezeConnect] = None
+
+# Per-user session cache — keyed by "api_key:session_token"
+_user_sessions: dict[str, BreezeConnect] = {}
+_user_sessions_lock = threading.Lock()
 
 
 def get_session() -> BreezeConnect:
-    """Return the active Breeze session, creating it if not yet initialised.
+    """Return the server-side singleton Breeze session (env-var credentials).
 
     Raises:
-        RuntimeError: If the session cannot be created (bad credentials, network error, etc.)
+        RuntimeError: If server-side credentials are not configured or session fails.
     """
     global _session
     if _session is None:
         _session = _initialise_session()
     return _session
+
+
+def get_session_for(api_key: str, api_secret: str, session_token: str) -> BreezeConnect:
+    """Return a per-user BreezeConnect session, cached by (api_key, session_token).
+
+    Thread-safe. Creates a new session on first call for each unique credential
+    pair; returns the cached session on subsequent calls.
+
+    Args:
+        api_key:       User's ICICI Breeze API key.
+        api_secret:    User's ICICI Breeze API secret.
+        session_token: User's daily session token.
+
+    Raises:
+        ValueError:   If any credential is empty.
+        RuntimeError: If Breeze authentication fails.
+    """
+    if not (api_key and api_secret and session_token):
+        raise ValueError("api_key, api_secret, and session_token must not be empty.")
+
+    cache_key = f"{api_key}:{session_token}"
+
+    with _user_sessions_lock:
+        if cache_key in _user_sessions:
+            return _user_sessions[cache_key]
+
+    # Create outside the lock to avoid blocking other threads during network I/O
+    _configure_proxy()
+    logger.info("Creating user Breeze session for api_key=%s***", api_key[:6])
+    try:
+        breeze = BreezeConnect(api_key=api_key)
+        breeze.generate_session(api_secret=api_secret, session_token=session_token)
+        with _user_sessions_lock:
+            _user_sessions[cache_key] = breeze
+        logger.info("User Breeze session ready for api_key=%s***", api_key[:6])
+        return breeze
+    except Exception as exc:
+        raise RuntimeError(f"Breeze authentication failed: {exc}") from exc
 
 
 def _configure_proxy() -> None:
@@ -85,13 +128,23 @@ def _initialise_session(session_token_override: Optional[str] = None) -> BreezeC
     _configure_proxy()
 
     token = session_token_override or settings.BREEZE_SESSION_TOKEN
+    api_key    = settings.BREEZE_API_KEY
+    api_secret = settings.BREEZE_API_SECRET
+
+    if not (api_key and api_secret and token):
+        raise RuntimeError(
+            "Server-side Breeze credentials are not configured. "
+            "Set BREEZE_API_KEY, BREEZE_API_SECRET, and BREEZE_SESSION_TOKEN "
+            "environment variables, or supply credentials via the login screen."
+        )
+
     logger.info("Initialising Breeze API session%s…",
                 " (token override)" if session_token_override else "")
 
     try:
-        breeze = BreezeConnect(api_key=settings.BREEZE_API_KEY)
+        breeze = BreezeConnect(api_key=api_key)
         breeze.generate_session(
-            api_secret=settings.BREEZE_API_SECRET,
+            api_secret=api_secret,
             session_token=token,
         )
         logger.info("Breeze API session initialised successfully.")

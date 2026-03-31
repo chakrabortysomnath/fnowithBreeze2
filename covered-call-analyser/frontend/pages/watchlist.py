@@ -5,11 +5,16 @@ Single-column layout with dark theme and top navigation.
 """
 
 import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 import requests
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from auth import check_credentials, get_auth_headers
 from jsx_report import generate_jsx
 from nav import NAV_CSS, nav_bar
 
@@ -34,6 +39,7 @@ st.set_page_config(
 )
 
 st.markdown(NAV_CSS, unsafe_allow_html=True)
+check_credentials()
 nav_bar("watchlist")
 
 # ── Brand header ──────────────────────────────────────────────────────────────
@@ -67,7 +73,7 @@ def _encode(sym: str) -> str:
 @st.cache_data(ttl=300)
 def _fetch_symbols() -> list[str]:
     try:
-        r = requests.get(f"{BACKEND_URL}/lot-sizes", timeout=5)
+        r = requests.get(f"{BACKEND_URL}/lot-sizes", headers=get_auth_headers(), timeout=5)
         r.raise_for_status()
         return sorted(r.json()["lot_sizes"].keys())
     except Exception:
@@ -78,7 +84,7 @@ def _fetch_expiries(symbol: str) -> list[str]:
     cache = st.session_state.wl_expiries_cache
     if symbol in cache:
         return cache[symbol]
-    r = requests.get(f"{BACKEND_URL}/expiries/{_encode(symbol)}", timeout=10)
+    r = requests.get(f"{BACKEND_URL}/expiries/{_encode(symbol)}", headers=get_auth_headers(), timeout=10)
     r.raise_for_status()
     expiries = r.json()["expiries"]
     cache[symbol] = expiries
@@ -94,6 +100,7 @@ def _run_watchlist() -> None:
         r = requests.post(
             f"{BACKEND_URL}/analyse-watchlist",
             json={"items": items},
+            headers=get_auth_headers(),
             timeout=60,
         )
         r.raise_for_status()

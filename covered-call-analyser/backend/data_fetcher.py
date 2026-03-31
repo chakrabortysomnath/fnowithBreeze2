@@ -15,6 +15,8 @@ from calendar import monthrange
 from datetime import date, datetime, timedelta
 from typing import Optional
 
+from breeze_connect import BreezeConnect
+
 from .breeze_client import get_session
 
 logger = logging.getLogger(__name__)
@@ -218,7 +220,7 @@ def delete_nse_symbol(fo_code: str) -> bool:
 # Phase 1 — Live equity quote
 # ---------------------------------------------------------------------------
 
-def get_cmp(symbol: str) -> float:
+def get_cmp(symbol: str, breeze: Optional[BreezeConnect] = None) -> float:
     """Fetch the Last Traded Price (LTP) for an NSE equity symbol.
 
     Uses Breeze's get_quotes API with exchange_code='NSE' and
@@ -239,7 +241,8 @@ def get_cmp(symbol: str) -> float:
         >>> price = get_cmp("RELIANCE")
         >>> print(f"Reliance LTP: ₹{price:.2f}")
     """
-    breeze = get_session()
+    if breeze is None:
+        breeze = get_session()
 
     logger.info(f"Fetching CMP for symbol: {symbol}")
 
@@ -400,7 +403,7 @@ def _to_breeze_iso(date_str: str) -> str:
     return f"{date_str}T06:00:00.000Z"
 
 
-def get_option_chain(symbol: str, expiry_date: str) -> list[dict]:
+def get_option_chain(symbol: str, expiry_date: str, breeze: Optional[BreezeConnect] = None) -> list[dict]:
     """Fetch the call option chain for a symbol and expiry date.
 
     Calls breeze.get_option_chain_quotes with right='call' to retrieve all
@@ -429,7 +432,8 @@ def get_option_chain(symbol: str, expiry_date: str) -> list[dict]:
         ValueError: If no option data is returned for this symbol/expiry.
         RuntimeError: If the Breeze API call itself fails.
     """
-    breeze = get_session()
+    if breeze is None:
+        breeze = get_session()
     breeze_expiry = _to_breeze_iso(expiry_date)
 
     logger.info(f"Fetching option chain for {symbol} expiry={breeze_expiry}")
@@ -505,7 +509,7 @@ def get_option_chain(symbol: str, expiry_date: str) -> list[dict]:
     return contracts
 
 
-def get_option_quote(symbol: str, expiry_date: str, strike: float) -> dict:
+def get_option_quote(symbol: str, expiry_date: str, strike: float, breeze: Optional[BreezeConnect] = None) -> dict:
     """Fetch a detailed option quote for a *specific* strike from the Breeze API.
 
     Tries strike_price in multiple formats (integer string, then float string)
@@ -527,7 +531,8 @@ def get_option_quote(symbol: str, expiry_date: str, strike: float) -> dict:
     Raises:
         RuntimeError: Breeze API call itself failed (network / session error).
     """
-    breeze        = get_session()
+    if breeze is None:
+        breeze = get_session()
     breeze_expiry = _to_breeze_iso(expiry_date)
 
     # Breeze may expect the strike as an integer ("2260") or a float ("2260.0").
@@ -660,7 +665,7 @@ def _safe_float(v) -> float:
         return 0.0
 
 
-def get_holdings() -> dict:
+def get_holdings(breeze: Optional[BreezeConnect] = None) -> dict:
     """Fetch portfolio holdings from Breeze.
 
     Makes exactly TWO Breeze API calls:
@@ -676,7 +681,8 @@ def get_holdings() -> dict:
     Raises RuntimeError with "429" prefix on Breeze rate-limit.
     Returns {"equity": [...], "mutual_funds": [...]}
     """
-    breeze = get_session()
+    if breeze is None:
+        breeze = get_session()
     logger.info("Fetching holdings from Breeze")
 
     def _check_rate_limit(resp: dict, label: str) -> None:

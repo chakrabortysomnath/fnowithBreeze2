@@ -30,10 +30,11 @@ import json
 import os
 import pathlib
 
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
+from breeze_connect import BreezeConnect
 
-from .breeze_client import get_session, is_connected, refresh_session
+from .breeze_client import get_session, get_session_for, is_connected, refresh_session
 from .calculator import analyse_covered_call
 from .data_fetcher import (
     get_cmp, get_lot_size, get_available_expiries, get_option_chain,
@@ -116,6 +117,63 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
+# Per-user Breeze session dependency
+# ---------------------------------------------------------------------------
+
+from pydantic import BaseModel as _BaseModel
+from typing import Optional as _Optional
+
+
+async def _get_breeze(
+    x_breeze_api_key:       _Optional[str] = Header(None),
+    x_breeze_api_secret:    _Optional[str] = Header(None),
+    x_breeze_session_token: _Optional[str] = Header(None),
+) -> _Optional[BreezeConnect]:
+    """FastAPI dependency: extract per-user Breeze credentials from request headers.
+
+    If all three headers are present, returns a per-user BreezeConnect session.
+    If headers are absent, returns None — data_fetcher functions fall back to the
+    server-side singleton session (env-var credentials).
+    Raises HTTP 401 if headers are present but authentication fails.
+    """
+    if x_breeze_api_key and x_breeze_api_secret and x_breeze_session_token:
+        try:
+            return get_session_for(
+                api_key=x_breeze_api_key,
+                api_secret=x_breeze_api_secret,
+                session_token=x_breeze_session_token,
+            )
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=401, detail=str(exc))
+    return None
+
+
+class _ValidateSessionRequest(_BaseModel):
+    api_key:       str
+    api_secret:    str
+    session_token: str
+
+
+@app.post("/validate-session", tags=["Session"],
+          summary="Validate user-provided Breeze credentials")
+def validate_session(req: _ValidateSessionRequest) -> dict:
+    """Authenticate with Breeze using the supplied credentials.
+
+    Called by the frontend login screen to verify credentials before storing
+    them in the browser session. Primes the per-user session cache so the
+    first real API call is fast.
+
+    Raises:
+        401: Credentials are invalid or Breeze authentication fails.
+    """
+    try:
+        get_session_for(req.api_key, req.api_secret, req.session_token)
+        return {"valid": True}
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
 # Phase 1 Endpoints
 # ---------------------------------------------------------------------------
 
@@ -176,7 +234,7 @@ def health_check() -> HealthResponse:
     ),
     tags=["Market Data"],
 )
-def get_quote(symbol: str) -> QuoteResponse:
+def get_quote(symbol: str, breeze: _Optional[BreezeConnect] = Depends(_get_breeze)) -> QuoteResponse:
     """Return live Current Market Price for an NSE equity symbol.
 
     Args:
@@ -196,7 +254,7 @@ def get_quote(symbol: str) -> QuoteResponse:
     logger.info(f"GET /quote/{decoded_symbol}")
 
     try:
-        cmp = get_cmp(decoded_symbol)
+        cmp = get_cmp(decoded_symbol, breeze=breeze)
     except ValueError as exc:
         logger.warning(f"Quote not found for {decoded_symbol}: {exc}")
         raise HTTPException(status_code=404, detail=str(exc))
@@ -308,6 +366,7 @@ def option_chain(
         description="Expiry date in YYYY-MM-DD format. Use /expiries/{symbol} to list dates.",
         examples=["2024-03-28"],
     ),
+    breeze: _Optional[BreezeConnect] = Depends(_get_breeze),
 ) -> OptionChainResponse:
     """Return the call option chain for a symbol and expiry date.
 
@@ -337,7 +396,7 @@ def option_chain(
         )
 
     try:
-        contracts_raw = get_option_chain(decoded, expiry)
+        contracts_raw = get_option_chain(decoded, expiry, breeze=breeze)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except RuntimeError as exc:
@@ -366,6 +425,7 @@ def option_quote(
     symbol: str,
     expiry: str = Query(..., description="Expiry date in YYYY-MM-DD format."),
     strike: float = Query(..., description="Strike price in INR, e.g. 2900.0"),
+    breeze: _Optional[BreezeConnect] = Depends(_get_breeze),
 ) -> OptionQuoteResponse:
     """Return IV, OI, and Volume for a specific call option strike.
 
@@ -392,7 +452,7 @@ def option_quote(
         )
 
     try:
-        q = get_option_quote(decoded, expiry, strike)
+        q = get_option_quote(decoded, expiry, strike, breeze=breeze)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except RuntimeError as exc:
@@ -671,7 +731,7 @@ def delete_equity_meta(symbol: str) -> Response:
     ),
     tags=["Analysis"],
 )
-def analyse(req: AnalyseRequest) -> AnalyseResponse:
+def analyse(req: AnalyseRequest, breeze: _Optional[BreezeConnect] = Depends(_get_breeze)) -> AnalyseResponse:
     """Execute a covered call analysis.
 
     Orchestrates: get_cmp → get_lot_size → get_option_chain → analyse_covered_call.
@@ -695,7 +755,7 @@ def analyse(req: AnalyseRequest) -> AnalyseResponse:
 
     # --- Fetch market data ---
     try:
-        cmp = get_cmp(symbol)
+        cmp = get_cmp(symbol, breeze=breeze)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except RuntimeError as exc:
@@ -707,7 +767,7 @@ def analyse(req: AnalyseRequest) -> AnalyseResponse:
         raise HTTPException(status_code=404, detail=str(exc))
 
     try:
-        chain = get_option_chain(symbol, req.expiry_date)
+        chain = get_option_chain(symbol, req.expiry_date, breeze=breeze)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except RuntimeError as exc:
@@ -758,7 +818,7 @@ def analyse(req: AnalyseRequest) -> AnalyseResponse:
     ),
     tags=["Analysis"],
 )
-def analyse_watchlist(req: WatchlistRequest) -> WatchlistResponse:
+def analyse_watchlist(req: WatchlistRequest, breeze: _Optional[BreezeConnect] = Depends(_get_breeze)) -> WatchlistResponse:
     """Run covered call analysis for each item in the watchlist.
 
     Each item is analysed independently. Failures are collected rather than
@@ -780,9 +840,9 @@ def analyse_watchlist(req: WatchlistRequest) -> WatchlistResponse:
             # Validate expiry format
             datetime.strptime(item.expiry_date, "%Y-%m-%d")
 
-            cmp       = get_cmp(symbol)
+            cmp       = get_cmp(symbol, breeze=breeze)
             lot_size  = get_lot_size(symbol)
-            chain     = get_option_chain(symbol, item.expiry_date)
+            chain     = get_option_chain(symbol, item.expiry_date, breeze=breeze)
             dte       = _dte(item.expiry_date)
 
             raw = analyse_covered_call(
@@ -835,7 +895,7 @@ def analyse_watchlist(req: WatchlistRequest) -> WatchlistResponse:
     ),
     tags=["Analysis"],
 )
-def compare(req: CompareRequest) -> WatchlistResponse:
+def compare(req: CompareRequest, breeze: _Optional[BreezeConnect] = Depends(_get_breeze)) -> WatchlistResponse:
     """Comparative analysis for 2–5 symbols.
 
     Reuses the same sequential analysis loop as /analyse-watchlist.
@@ -853,9 +913,9 @@ def compare(req: CompareRequest) -> WatchlistResponse:
         symbol = item.symbol.strip().upper()
         try:
             datetime.strptime(item.expiry_date, "%Y-%m-%d")
-            cmp       = get_cmp(symbol)
+            cmp       = get_cmp(symbol, breeze=breeze)
             lot_size  = get_lot_size(symbol)
-            chain     = get_option_chain(symbol, item.expiry_date)
+            chain     = get_option_chain(symbol, item.expiry_date, breeze=breeze)
             dte       = _dte(item.expiry_date)
             raw = analyse_covered_call(
                 symbol=symbol,
@@ -944,7 +1004,7 @@ def refresh_session_endpoint(req: RefreshSessionRequest) -> RefreshSessionRespon
 # ---------------------------------------------------------------------------
 
 @app.get("/holdings", response_model=HoldingsResponse, tags=["holdings"])
-def get_holdings_endpoint() -> HoldingsResponse:
+def get_holdings_endpoint(breeze: _Optional[BreezeConnect] = Depends(_get_breeze)) -> HoldingsResponse:
     """Return the full portfolio holdings split into equity and mutual funds.
 
     Fetches live data from Breeze `get_portfolio_holdings()` and normalises
@@ -952,7 +1012,7 @@ def get_holdings_endpoint() -> HoldingsResponse:
     computed locally when Breeze omits them.
     """
     try:
-        data = get_holdings()
+        data = get_holdings(breeze=breeze)
     except RuntimeError as exc:
         msg = str(exc)
         # Propagate Breeze rate-limit as HTTP 429 so the frontend can show

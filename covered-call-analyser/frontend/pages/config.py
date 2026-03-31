@@ -10,11 +10,15 @@ Provides review, edit, add, and delete capabilities for all master data:
 
 import json
 import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import pandas as pd
 import requests
 import streamlit as st
 
+from auth import check_credentials, get_auth_headers
 from nav import NAV_CSS, brand_header, nav_bar
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000").rstrip("/")
@@ -28,6 +32,7 @@ st.set_page_config(
 )
 
 st.markdown(NAV_CSS, unsafe_allow_html=True)
+check_credentials()
 nav_bar("config")
 brand_header(
     "⚙️", "Configuration",
@@ -43,7 +48,7 @@ brand_header(
 @st.cache_data(ttl=5)
 def _fetch_lot_sizes() -> dict[str, int] | None:
     try:
-        r = requests.get(f"{BACKEND_URL}/lot-sizes", timeout=5)
+        r = requests.get(f"{BACKEND_URL}/lot-sizes", headers=get_auth_headers(), timeout=5)
         r.raise_for_status()
         return r.json()["lot_sizes"]
     except Exception as exc:
@@ -54,7 +59,7 @@ def _fetch_lot_sizes() -> dict[str, int] | None:
 @st.cache_data(ttl=5)
 def _fetch_nse_symbols() -> dict[str, str] | None:
     try:
-        r = requests.get(f"{BACKEND_URL}/nse-symbols", timeout=5)
+        r = requests.get(f"{BACKEND_URL}/nse-symbols", headers=get_auth_headers(), timeout=5)
         r.raise_for_status()
         return r.json()["symbols"]
     except Exception as exc:
@@ -65,7 +70,7 @@ def _fetch_nse_symbols() -> dict[str, str] | None:
 @st.cache_data(ttl=10)
 def _fetch_equity_meta() -> dict | None:
     try:
-        r = requests.get(f"{BACKEND_URL}/equity-meta", timeout=5)
+        r = requests.get(f"{BACKEND_URL}/equity-meta", headers=get_auth_headers(), timeout=5)
         r.raise_for_status()
         return r.json()["metadata"]
     except Exception as exc:
@@ -76,7 +81,7 @@ def _fetch_equity_meta() -> dict | None:
 @st.cache_data(ttl=15)
 def _fetch_health() -> dict | None:
     try:
-        r = requests.get(f"{BACKEND_URL}/health", timeout=5)
+        r = requests.get(f"{BACKEND_URL}/health", headers=get_auth_headers(), timeout=5)
         r.raise_for_status()
         return r.json()
     except Exception:
@@ -152,6 +157,7 @@ with tab1:
                 r = requests.post(
                     f"{BACKEND_URL}/lot-sizes",
                     json={"symbol": new_sym, "lot_size": int(new_lot)},
+                    headers=get_auth_headers(),
                     timeout=5,
                 )
                 r.raise_for_status()
@@ -181,7 +187,7 @@ with tab1:
             st.warning("Symbol cannot be empty.")
         else:
             try:
-                r = requests.delete(f"{BACKEND_URL}/lot-sizes/{del_sym}", timeout=5)
+                r = requests.delete(f"{BACKEND_URL}/lot-sizes/{del_sym}", headers=get_auth_headers(), timeout=5)
                 if r.status_code == 204:
                     st.success(f"Deleted: **{del_sym}**")
                     st.cache_data.clear()
@@ -282,6 +288,7 @@ with tab2:
                 r = requests.post(
                     f"{BACKEND_URL}/nse-symbols",
                     json={"fo_code": nse_fo_code, "nse_ticker": nse_ticker},
+                    headers=get_auth_headers(),
                     timeout=5,
                 )
                 r.raise_for_status()
@@ -311,7 +318,7 @@ with tab2:
             st.warning("F&O code cannot be empty.")
         else:
             try:
-                r = requests.delete(f"{BACKEND_URL}/nse-symbols/{del_fo_code}", timeout=5)
+                r = requests.delete(f"{BACKEND_URL}/nse-symbols/{del_fo_code}", headers=get_auth_headers(), timeout=5)
                 if r.status_code == 204:
                     st.success(f"Deleted mapping for **{del_fo_code}**")
                     st.cache_data.clear()
@@ -412,6 +419,7 @@ with tab3:
                 r = requests.post(
                     f"{BACKEND_URL}/equity-meta",
                     json={"symbol": eq_symbol, "sector": eq_sector, "industry": eq_industry},
+                    headers=get_auth_headers(),
                     timeout=5,
                 )
                 r.raise_for_status()
@@ -443,7 +451,7 @@ with tab3:
             st.warning("Symbol cannot be empty.")
         else:
             try:
-                r = requests.delete(f"{BACKEND_URL}/equity-meta/{del_eq_sym}", timeout=5)
+                r = requests.delete(f"{BACKEND_URL}/equity-meta/{del_eq_sym}", headers=get_auth_headers(), timeout=5)
                 if r.status_code == 204:
                     st.success(f"Deleted metadata for **{del_eq_sym}**")
                     st.cache_data.clear()
@@ -526,6 +534,7 @@ with tab4:
                     r = requests.post(
                         f"{BACKEND_URL}/refresh-session",
                         json={"session_token": new_token.strip()},
+                        headers=get_auth_headers(),
                         timeout=20,
                     )
                     if r.status_code == 200:
