@@ -103,7 +103,11 @@ def check_credentials() -> None:
                         }
                         st.rerun()
                     else:
-                        detail = r.json().get("detail", r.text) if r.content else r.reason
+                        # ── detail = r.json().get("detail", r.text) if r.content else r.reason
+                        try:
+                            detail = r.json().get("detail", r.text)
+                        except Exception:
+                            detail = r.text or r.reason
                         st.error(f"Authentication failed: {detail}")
                 except _requests.exceptions.ConnectionError:
                     st.error("Cannot reach the backend. Check that the service is running.")
