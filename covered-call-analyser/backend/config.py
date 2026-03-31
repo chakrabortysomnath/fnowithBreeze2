@@ -86,43 +86,42 @@ def get_settings() -> Settings:
 # Module-level convenience alias used throughout the app
 settings = get_settings()
 
+# --- Charge defaults (optional) ---
+DEFAULT_BROKERAGE: float = Field(
+    default=40.0, description="Fixed brokerage per leg in INR"
+)
+DEFAULT_STT_RATE: float = Field(
+    default=0.001, description="STT rate (0.001 = 0.1% on premium)"
+)
+DEFAULT_GST_RATE: float = Field(
+    default=0.18, description="GST on brokerage (0.18 = 18%)"
+)
 
-    # --- Charge defaults (optional) ---
-    DEFAULT_BROKERAGE: float = Field(
-        default=40.0, description="Fixed brokerage per leg in INR"
-    )
-    DEFAULT_STT_RATE: float = Field(
-        default=0.001, description="STT rate (0.001 = 0.1% on premium)"
-    )
-    DEFAULT_GST_RATE: float = Field(
-        default=0.18, description="GST on brokerage (0.18 = 18%)"
-    )
+# --- Static IP proxy (Phase 5, optional) ---
+QUOTAGUARDSTATIC_URL: str | None = Field(
+    default=None,
+    description="QuotaGuard Static proxy URL; if set, Breeze calls route through it",
+)
 
-    # --- Static IP proxy (Phase 5, optional) ---
-    QUOTAGUARDSTATIC_URL: str | None = Field(
-        default=None,
-        description="QuotaGuard Static proxy URL; if set, Breeze calls route through it",
-    )
+# --- Logging ---
+LOG_LEVEL: str = Field(default="INFO", description="Python logging level")
 
-    # --- Logging ---
-    LOG_LEVEL: str = Field(default="INFO", description="Python logging level")
+# --- Health check caching ---
+HEALTH_CHECK_INTERVAL: int = Field(
+    default=120,
+    description=(
+        "Seconds between real Breeze connectivity checks in /health. "
+        "Render's platform polls /health every few seconds; this cache prevents "
+        "is_connected() and its log line from firing on every single poll. "
+        "Set to 0 to disable caching (check on every call)."
+    ),
+)
 
-    # --- Health check caching ---
-    HEALTH_CHECK_INTERVAL: int = Field(
-        default=30,
-        description=(
-            "Seconds between real Breeze connectivity checks in /health. "
-            "Render's platform polls /health every few seconds; this cache prevents "
-            "is_connected() and its log line from firing on every single poll. "
-            "Set to 0 to disable caching (check on every call)."
-        ),
-    )
-
-    model_config = {
-        "env_file": ".env",
-        "env_file_encoding": "utf-8",
-        "case_sensitive": True,
-    }
+model_config = {
+    "env_file": ".env",
+    "env_file_encoding": "utf-8",
+    "case_sensitive": True,
+}
 
 
 @lru_cache(maxsize=1)
