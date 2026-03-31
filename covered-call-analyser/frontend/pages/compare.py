@@ -10,11 +10,15 @@ prompt caching and max_tokens=300.
 import io
 import math as _math
 import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import pandas as pd
 import requests
 import streamlit as st
 
+from auth import check_credentials, get_auth_headers
 from nav import NAV_CSS, brand_header, nav_bar
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000").rstrip("/")
@@ -37,6 +41,7 @@ st.set_page_config(
 )
 
 st.markdown(NAV_CSS, unsafe_allow_html=True)
+check_credentials()
 nav_bar("compare")
 brand_header(
     "⚖️", "Instrument Comparison",
@@ -56,7 +61,7 @@ def _encode(sym: str) -> str:
 @st.cache_data(ttl=300)
 def _fetch_symbols() -> list[str]:
     try:
-        r = requests.get(f"{BACKEND_URL}/lot-sizes", timeout=5)
+        r = requests.get(f"{BACKEND_URL}/lot-sizes", headers=get_auth_headers(), timeout=5)
         r.raise_for_status()
         return sorted(r.json()["lot_sizes"].keys())
     except Exception:
@@ -66,7 +71,7 @@ def _fetch_symbols() -> list[str]:
 def _fetch_nearest_expiry(symbol: str) -> str | None:
     """Return the nearest available expiry date for the symbol."""
     try:
-        r = requests.get(f"{BACKEND_URL}/expiries/{_encode(symbol)}", timeout=10)
+        r = requests.get(f"{BACKEND_URL}/expiries/{_encode(symbol)}", headers=get_auth_headers(), timeout=10)
         r.raise_for_status()
         expiries = r.json().get("expiries", [])
         return expiries[0] if expiries else None
@@ -510,6 +515,7 @@ if run_clicked and len(selected_symbols) >= 2:
             r = requests.post(
                 f"{BACKEND_URL}/compare",
                 json={"items": items},
+                headers=get_auth_headers(),
                 timeout=120,
             )
             r.raise_for_status()

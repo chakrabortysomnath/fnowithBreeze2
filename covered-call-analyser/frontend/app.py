@@ -13,6 +13,7 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
+from auth import check_credentials, get_auth_headers
 from nav import NAV_CSS, brand_header, nav_bar
 
 # ── Static equity metadata (sector / industry lookup) ─────────────────────────
@@ -69,6 +70,7 @@ st.set_page_config(
 )
 
 st.markdown(NAV_CSS, unsafe_allow_html=True)
+check_credentials()
 nav_bar("analyse")
 brand_header()
 
@@ -81,7 +83,7 @@ def _ping_backend(url: str) -> dict:
     Cached for HEALTH_CHECK_TTL seconds so repeated Streamlit reruns
     (widget interactions, etc.) do not hammer the backend.
     """
-    return requests.get(url, timeout=5).json()
+    return requests.get(url, headers=get_auth_headers(), timeout=5).json()
 
 if PING_URL:
     try:
@@ -119,7 +121,7 @@ def _fetch_nse_symbol_map() -> dict[str, str]:
     """Return F&O shortcode → NSE equity ticker from the backend config."""
     source = f"backend {BACKEND_URL}/lot-sizes"
     try:
-        r = requests.get(f"{BACKEND_URL}/lot-sizes", timeout=5)
+        r = requests.get(f"{BACKEND_URL}/lot-sizes", headers=get_auth_headers(), timeout=5)
         r.raise_for_status()
         result = r.json().get("nse_symbols", {})
         if not result:
@@ -164,7 +166,7 @@ def _yf_ticker(symbol: str, nse_map: dict[str, str]) -> str:
 @st.cache_data(ttl=300)
 def _fetch_symbols() -> list[str]:
     try:
-        r = requests.get(f"{BACKEND_URL}/lot-sizes", timeout=5)
+        r = requests.get(f"{BACKEND_URL}/lot-sizes", headers=get_auth_headers(), timeout=5)
         r.raise_for_status()
         return sorted(r.json()["lot_sizes"].keys())
     except Exception:
@@ -172,10 +174,10 @@ def _fetch_symbols() -> list[str]:
 
 
 @st.cache_data(ttl=300)
-def _fetch_holdings() -> dict:
-    """Fetch portfolio holdings from backend (cached 5 min). Returns empty on failure."""
+def _fetch_holdings(session_token: str = "") -> dict:
+    """Fetch portfolio holdings from backend (cached 5 min per user). Returns empty on failure."""
     try:
-        r = requests.get(f"{BACKEND_URL}/holdings", timeout=10)
+        r = requests.get(f"{BACKEND_URL}/holdings", headers=get_auth_headers(), timeout=10)
         r.raise_for_status()
         return r.json()
     except Exception:
@@ -206,13 +208,13 @@ def _find_holding(symbol: str, equity: list[dict]) -> dict | None:
 
 
 def _fetch_expiries(symbol: str) -> list[str]:
-    r = requests.get(f"{BACKEND_URL}/expiries/{_encode(symbol)}", timeout=10)
+    r = requests.get(f"{BACKEND_URL}/expiries/{_encode(symbol)}", headers=get_auth_headers(), timeout=10)
     r.raise_for_status()
     return r.json()["expiries"]
 
 
 def _fetch_analyse(payload: dict) -> dict:
-    r = requests.post(f"{BACKEND_URL}/analyse", json=payload, timeout=30)
+    r = requests.post(f"{BACKEND_URL}/analyse", json=payload, headers=get_auth_headers(), timeout=30)
     r.raise_for_status()
     return r.json()
 
@@ -283,6 +285,7 @@ def _fetch_option_quote(symbol: str, expiry_date: str, strike: float) -> dict:
         r = requests.get(
             f"{BACKEND_URL}/option-quote/{_encode(symbol)}",
             params={"expiry": expiry_date, "strike": strike},
+            headers=get_auth_headers(),
             timeout=15,
         )
         r.raise_for_status()
@@ -1303,7 +1306,8 @@ if symbol and symbol != st.session_state.symbol_loaded:
         st.error(f"Could not load expiries for {symbol}: {exc}")
     # Prefill holding qty and avg cost from portfolio
     try:
-        hdata = _fetch_holdings()
+        _session_token = (st.session_state.get("breeze_creds") or {}).get("session_token", "")
+        hdata = _fetch_holdings(_session_token)
         held  = _find_holding(symbol, hdata.get("equity", []))
         st.session_state._holding_found = held is not None
         st.session_state._qty_held_val  = int(float(held["quantity"])) if held else 250

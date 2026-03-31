@@ -6,10 +6,14 @@ and displays them in two colour-coded tables with P&L breakdown.
 """
 
 import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import requests
 import streamlit as st
 
+from auth import check_credentials, get_auth_headers
 from nav import NAV_CSS, brand_header, nav_bar
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000").rstrip("/")
@@ -23,6 +27,7 @@ st.set_page_config(
 )
 
 st.markdown(NAV_CSS, unsafe_allow_html=True)
+check_credentials()
 nav_bar("holdings")
 brand_header(
     "💼", "Holdings",
@@ -33,8 +38,8 @@ brand_header(
 
 
 @st.cache_data(ttl=300)   # 5 min — Breeze rate-limits frequent calls
-def _fetch_holdings() -> dict:
-    r = requests.get(f"{BACKEND_URL}/holdings", timeout=30)
+def _fetch_holdings(session_token: str) -> dict:
+    r = requests.get(f"{BACKEND_URL}/holdings", headers=get_auth_headers(), timeout=30)
     r.raise_for_status()
     return r.json()
 
@@ -145,8 +150,9 @@ st.divider()
 
 # ── Fetch ─────────────────────────────────────────────────────────────────────
 
+_session_token = (st.session_state.get("breeze_creds") or {}).get("session_token", "")
 try:
-    data = _fetch_holdings()
+    data = _fetch_holdings(_session_token)
 except requests.exceptions.ConnectionError:
     st.error("Cannot connect to backend. Is the FastAPI server running?")
     st.stop()
@@ -161,6 +167,8 @@ except requests.HTTPError as exc:
             "⏳ Breeze API rate limit reached — too many requests in a short window. "
             "Please wait 60 seconds and then click **🔄 Refresh**."
         )
+    elif exc.response.status_code == 401:
+        st.error("Session expired. Please reconnect via the login screen.")
     else:
         st.error(f"Backend error {exc.response.status_code}: {detail}")
     st.stop()
