@@ -211,9 +211,11 @@ def is_connected() -> bool:
 
     This is a lightweight check — it does not make an API call.
     For a real connectivity check, call get_cmp() with a known symbol.
+    Checks the singleton first; falls back to per-user session cache
+    so multi-user deployments (no server-side env vars) report correctly.
     """
     try:
-        sess = get_session()
-        return sess is not None
+        return get_session() is not None
     except Exception:
-        return False
+        with _user_sessions_lock:
+            return bool(_user_sessions)
