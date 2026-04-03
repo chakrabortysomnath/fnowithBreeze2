@@ -189,7 +189,9 @@ _health_cache: dict = {"connected": None, "message": None, "ts": 0.0}
     description="Returns server status and whether the Breeze API session is active.",
     tags=["Health"],
 )
-def health_check() -> HealthResponse:
+def health_check(
+    breeze: _Optional[BreezeConnect] = Depends(_get_breeze),
+) -> HealthResponse:
     """Check server health and Breeze API connectivity.
 
     Results are cached for HEALTH_CHECK_INTERVAL seconds (default 30) so
@@ -197,9 +199,17 @@ def health_check() -> HealthResponse:
     does not generate a log entry on every call.  Set HEALTH_CHECK_INTERVAL=0
     to disable caching and check on every request.
 
+    In multi-user mode (no server-side env vars), breeze is injected from the
+    request's X-Breeze-* headers; if that session is valid, the user is connected.
+
     Returns:
         HealthResponse with status='ok' and breeze_connected=True/False.
     """
+    # Per-user session takes priority — if the requesting user is authenticated,
+    # they are connected regardless of whether the server-side singleton exists.
+    if breeze is not None:
+        return HealthResponse(status="ok", breeze_connected=True, message=None)
+
     interval = settings.HEALTH_CHECK_INTERVAL
     now = time.monotonic()
     if interval > 0 and (now - _health_cache["ts"]) < interval:
