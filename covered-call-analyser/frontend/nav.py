@@ -165,11 +165,12 @@ def nav_bar(active: str) -> None:
     active: kept for call-site compatibility; Streamlit sets aria-current automatically.
     """
     pages = [
-        ("🔍 Analyse",        "app.py",            "analyse"),
-        ("⚖️ Compare",        "pages/compare.py",  "compare"),
-        ("💼 Holdings",       "pages/holdings.py", "holdings"),
-        ("⚙️ Config",         "pages/config.py",   "config"),
-        ("📖 Ready Reckoner", "pages/glossary.py", "glossary"),
+        ("🔍 Analyse",        "app.py",             "analyse"),
+        ("⚖️ Compare",        "pages/compare.py",   "compare"),
+        ("🪢 Strangle",       "pages/strangle.py",  "strangle"),
+        ("💼 Holdings",       "pages/holdings.py",  "holdings"),
+        ("⚙️ Config",         "pages/config.py",    "config"),
+        ("📖 Ready Reckoner", "pages/glossary.py",  "glossary"),
     ]
     cols = st.columns(len(pages))
     for col, (label, page_file, _key) in zip(cols, pages):

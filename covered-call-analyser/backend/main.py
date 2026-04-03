@@ -35,7 +35,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from breeze_connect import BreezeConnect
 
 from .breeze_client import get_session, get_session_for, is_connected, refresh_session
-from .calculator import analyse_covered_call
+from .calculator import analyse_covered_call, _days_to_expiry
 from .data_fetcher import (
     get_cmp, get_lot_size, get_available_expiries, get_option_chain,
     get_option_quote,
@@ -55,6 +55,8 @@ from .models import (
     UpsertNseSymbolRequest, NseSymbolResponse, NseSymbolTableResponse,
     UpsertEquityMetaRequest, EquityMetaResponse, EquityMetaTableResponse,
     HoldingsResponse,
+    StrangleAnalyseRequest, StrangleLegAnalysis, StrangleAnalyseResponse,
+    StrangleOptionChainResponse,
 )
 
 # Path to the equity metadata JSON file (kept in frontend directory)
@@ -1039,6 +1041,156 @@ def get_holdings_endpoint(breeze: _Optional[BreezeConnect] = Depends(_get_breeze
         timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
 
+
+# ---------------------------------------------------------------------------
+# Phase 7 — Short Strangle Analysis
+# ---------------------------------------------------------------------------
+
+@app.get(
+    "/strangle/expiries/{symbol}",
+    response_model=ExpiriesResponse,
+    summary="List monthly expiry dates for a symbol",
+    description="Return available option expiry dates for short strangle analysis.",
+    tags=["Strangle Analysis"],
+)
+def strangle_expiries(symbol: str) -> ExpiriesResponse:
+    """Return available option expiry dates for a symbol."""
+    try:
+        symbol = symbol.strip().upper()
+        expiries = get_available_expiries(symbol)
+        return ExpiriesResponse(symbol=symbol, expiries=expiries)
+    except Exception as exc:
+        logger.error(f"Error fetching expiries for {symbol}: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get(
+    "/strangle/option-chain/{symbol}",
+    response_model=StrangleOptionChainResponse,
+    summary="Fetch call + put option chains for strangle analysis",
+    description=(
+        "Return both call (CE) and put (PE) option chains for a symbol/expiry. "
+        "Useful for constructing short strangles (sell OTM call + OTM put)."
+    ),
+    tags=["Strangle Analysis"],
+)
+def strangle_option_chain(
+    symbol: str,
+    expiry: str = Query(..., description="Expiry date in YYYY-MM-DD format"),
+    breeze: _Optional[BreezeConnect] = Depends(_get_breeze),
+) -> StrangleOptionChainResponse:
+    """Fetch combined call + put option chains for a symbol and expiry."""
+    try:
+        symbol = symbol.strip().upper()
+        expiry = expiry.strip()
+
+        # Fetch call chain
+        calls = get_option_chain(symbol, expiry, right="call", breeze=breeze)
+
+        # Fetch put chain
+        puts = get_option_chain(symbol, expiry, right="put", breeze=breeze)
+
+        return StrangleOptionChainResponse(
+            symbol=symbol,
+            expiry_date=expiry,
+            calls=calls,
+            puts=puts,
+        )
+    except ValueError as exc:
+        logger.error(f"Validation error in /strangle/option-chain/{symbol}: {exc}")
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"Error in /strangle/option-chain/{symbol}: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post(
+    "/strangle/analyse",
+    response_model=StrangleAnalyseResponse,
+    summary="Analyse a short strangle position",
+    description=(
+        "Compute P&L metrics, breakevens, and payoff curve for a short strangle. "
+        "Requires live CMP and option premiums from Breeze."
+    ),
+    tags=["Strangle Analysis"],
+)
+def strangle_analyse(
+    req: StrangleAnalyseRequest,
+    breeze: _Optional[BreezeConnect] = Depends(_get_breeze),
+) -> StrangleAnalyseResponse:
+    """Analyse a short strangle position and return all metrics."""
+    try:
+        from .calculator import calculate_strangle
+
+        symbol = req.symbol.strip().upper()
+        expiry = req.expiry_date.strip()
+
+        # 1. Get current market price (CMP)
+        cmp = get_cmp(symbol, breeze=breeze)
+
+        # 2. Get lot size
+        lot_size = get_lot_size(symbol)
+
+        # 3. Get both option chains
+        call_chain = get_option_chain(symbol, expiry, right="call", breeze=breeze)
+        put_chain = get_option_chain(symbol, expiry, right="put", breeze=breeze)
+
+        # 4. Find premiums at requested strikes
+        call_premium = None
+        for contract in call_chain:
+            if contract["strike_price"] == req.call_strike:
+                call_premium = contract["ltp"]
+                break
+
+        put_premium = None
+        for contract in put_chain:
+            if contract["strike_price"] == req.put_strike:
+                put_premium = contract["ltp"]
+                break
+
+        if call_premium is None:
+            raise ValueError(
+                f"Call strike {req.call_strike} not found in option chain. "
+                f"Available strikes range: {call_chain[0]['strike_price']} — {call_chain[-1]['strike_price']}"
+            )
+
+        if put_premium is None:
+            raise ValueError(
+                f"Put strike {req.put_strike} not found in option chain. "
+                f"Available strikes range: {put_chain[0]['strike_price']} — {put_chain[-1]['strike_price']}"
+            )
+
+        # 5. Compute days to expiry
+        days_to_expiry = _days_to_expiry(expiry)
+
+        # 6. Run calculator
+        result = calculate_strangle(
+            symbol=symbol,
+            cmp=cmp,
+            lot_size=lot_size,
+            expiry_date=expiry,
+            days_to_expiry=days_to_expiry,
+            call_strike=req.call_strike,
+            call_premium=call_premium,
+            put_strike=req.put_strike,
+            put_premium=put_premium,
+            brokerage=req.brokerage,
+            stt_rate=req.stt_rate,
+            gst_rate=req.gst_rate,
+        )
+
+        # 7. Build response
+        return StrangleAnalyseResponse(
+            **result,
+            timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+
+    except ValueError as exc:
+        logger.error(f"Validation error in /strangle/analyse: {exc}")
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"Error in /strangle/analyse: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # Root redirect → docs
