@@ -262,3 +262,164 @@ def analyse_covered_call(
         },
         "strikes": analysed_strikes,
     }
+
+
+def calculate_strangle(
+    symbol: str,
+    cmp: float,
+    lot_size: int,
+    expiry_date: str,
+    days_to_expiry: int,
+    call_strike: float,
+    call_premium: float,
+    put_strike: float,
+    put_premium: float,
+    brokerage: float = 40.0,
+    stt_rate: float = 0.001,
+    gst_rate: float = 0.18,
+) -> dict:
+    """Compute P&L metrics for a short strangle position.
+
+    A short strangle = sell OTM call + sell OTM put on the same stock/expiry.
+    - Max profit: total net premium collected (if stock stays between strikes at expiry)
+    - Unlimited loss if stock rallies above upper breakeven
+    - Limited loss if stock crashes below lower breakeven
+
+    Args:
+        symbol:               F&O symbol (e.g., "BANKNIFTY")
+        cmp:                  Current market price (INR)
+        lot_size:             Shares per lot
+        expiry_date:          Option expiry (YYYY-MM-DD format)
+        days_to_expiry:       Calendar days from today to expiry
+        call_strike:          Strike price of short call (INR)
+        call_premium:         Premium of short call (what we receive, INR/share)
+        put_strike:           Strike price of short put (INR)
+        put_premium:          Premium of short put (what we receive, INR/share)
+        brokerage:            Fixed brokerage per lot (INR)
+        stt_rate:             STT rate as decimal (0.001 = 0.1%)
+        gst_rate:             GST rate as decimal (0.18 = 18%)
+
+    Returns:
+        dict matching StrangleAnalyseResponse structure with all metrics.
+    """
+    shares = lot_size
+
+    # Compute charges for each leg (call and put are separate)
+    call_charges = _compute_charges(
+        call_premium, shares, 1, brokerage, stt_rate, gst_rate
+    )
+    put_charges = _compute_charges(
+        put_premium, shares, 1, brokerage, stt_rate, gst_rate
+    )
+
+    # Gross premiums
+    call_premium_total = round(call_premium * shares, 2)
+    put_premium_total = round(put_premium * shares, 2)
+
+    # Net premiums (after charges)
+    call_net_total = round(call_premium_total - call_charges["total"], 2)
+    call_net_per_share = round(call_net_total / shares, 4)
+
+    put_net_total = round(put_premium_total - put_charges["total"], 2)
+    put_net_per_share = round(put_net_total / shares, 4)
+
+    # Combined net premium (both legs, what we keep after charges)
+    total_net_per_share = round(call_net_per_share + put_net_per_share, 4)
+    total_net_total = round(call_net_total + put_net_total, 2)
+
+    # Breakevens
+    upper_breakeven = round(call_strike + total_net_per_share, 2)
+    lower_breakeven = round(put_strike - total_net_per_share, 2)
+    profit_zone_width = round(upper_breakeven - lower_breakeven, 2)
+
+    # P&L bounds
+    # Max profit: total net premium collected (if stock stays between strikes)
+    max_profit = round(total_net_per_share * shares, 2)
+
+    # Max loss upside: unlimited
+    max_loss_upside = "Unlimited"
+
+    # Max loss downside: (put_strike - net_premium) * shares
+    # If stock goes to zero, we keep the net premium but lose the put strike value
+    max_loss_downside = round((put_strike - total_net_per_share) * shares, 2)
+
+    # Estimated margin (SPAN ~15% of notional of larger leg)
+    larger_strike = max(call_strike, put_strike)
+    larger_notional = round(larger_strike * shares, 2)
+    estimated_margin = round(larger_notional * 0.15, 2)
+
+    # ROI on margin
+    roi_on_margin_pct = (
+        round((total_net_per_share / (estimated_margin / shares)) * 100, 2)
+        if estimated_margin > 0
+        else 0
+    )
+
+    # Payoff curve: P&L at expiry for range of stock prices (CMP ± 15%)
+    lo = round(cmp * 0.85, 2)
+    hi = round(cmp * 1.15, 2)
+    n_points = 50
+    step = (hi - lo) / (n_points - 1) if n_points > 1 else 0
+    payoff_points = []
+
+    for i in range(n_points):
+        price = round(lo + i * step, 2)
+
+        # P&L from short call: if stock above call_strike, we lose
+        # (stock_price - call_strike) * shares
+        if price > call_strike:
+            call_pl = round(-(price - call_strike) * shares, 2)
+        else:
+            call_pl = 0
+
+        # P&L from short put: if stock below put_strike, we lose
+        # (put_strike - stock_price) * shares
+        if price < put_strike:
+            put_pl = round(-(put_strike - price) * shares, 2)
+        else:
+            put_pl = 0
+
+        # Total P&L = call_pl + put_pl + net premiums - charges
+        total_pl = round(
+            call_pl + put_pl + total_net_total,
+            2
+        )
+
+        payoff_points.append({"price": price, "pl": total_pl})
+
+    return {
+        "symbol": symbol,
+        "cmp": cmp,
+        "lot_size": lot_size,
+        "expiry_date": expiry_date,
+        "days_to_expiry": days_to_expiry,
+        "call_leg": {
+            "strike": call_strike,
+            "leg_type": "CE",
+            "premium_per_share": call_premium,
+            "premium_total": call_premium_total,
+            "charges": call_charges,
+            "net_premium_per_share": call_net_per_share,
+            "net_premium_total": call_net_total,
+        },
+        "put_leg": {
+            "strike": put_strike,
+            "leg_type": "PE",
+            "premium_per_share": put_premium,
+            "premium_total": put_premium_total,
+            "charges": put_charges,
+            "net_premium_per_share": put_net_per_share,
+            "net_premium_total": put_net_total,
+        },
+        "total_premium_collected": total_net_per_share,
+        "total_premium_collected_total": total_net_total,
+        "upper_breakeven": upper_breakeven,
+        "lower_breakeven": lower_breakeven,
+        "profit_zone_width": profit_zone_width,
+        "max_profit": max_profit,
+        "max_loss_upside": max_loss_upside,
+        "max_loss_downside": max_loss_downside,
+        "estimated_margin_required": estimated_margin,
+        "roi_on_margin_pct": roi_on_margin_pct,
+        "payoff": payoff_points,
+    }

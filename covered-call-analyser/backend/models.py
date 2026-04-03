@@ -426,3 +426,99 @@ class WatchlistResponse(BaseModel):
     succeeded: int = Field(description="Number of items that analysed successfully.")
     failed: int = Field(description="Number of items that failed.")
     timestamp: str
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 — Short Strangle Analysis
+# ---------------------------------------------------------------------------
+
+class StrangleAnalyseRequest(BaseModel):
+    """Request body for POST /strangle/analyse."""
+
+    symbol: str = Field(description="NSE F&O symbol, e.g. BANKNIFTY.")
+    expiry_date: str = Field(description="Option expiry in YYYY-MM-DD format.")
+    call_strike: float = Field(description="Strike price for selling calls.")
+    put_strike: float = Field(description="Strike price for selling puts.")
+    brokerage: float = Field(
+        default=40.0, gt=0,
+        description="Fixed brokerage per option lot written (INR).",
+    )
+    stt_rate: float = Field(
+        default=0.001, gt=0,
+        description="STT rate on option premium as a decimal (0.001 = 0.1%).",
+    )
+    gst_rate: float = Field(
+        default=0.18, gt=0,
+        description="GST rate on brokerage as a decimal (0.18 = 18%).",
+    )
+
+
+class StrangleLegAnalysis(BaseModel):
+    """Analysis of a single leg (call or put) in a short strangle."""
+
+    strike: float = Field(description="Strike price (INR).")
+    leg_type: str = Field(description="'CE' for call, 'PE' for put.")
+    premium_per_share: float = Field(description="Gross premium per share (INR).")
+    premium_total: float = Field(description="Gross premium × shares (INR).")
+    charges: ChargesBreakdown = Field(description="Brokerage, STT, GST breakdown.")
+    net_premium_per_share: float = Field(description="Premium per share after charges (INR).")
+    net_premium_total: float = Field(description="Net premium for all shares (INR).")
+
+
+class StrangleAnalyseResponse(BaseModel):
+    """Response model for POST /strangle/analyse."""
+
+    symbol: str = Field(description="NSE F&O symbol.")
+    cmp: float = Field(description="Current market price (INR).")
+    lot_size: int = Field(description="Shares per lot.")
+    expiry_date: str = Field(description="Option expiry (YYYY-MM-DD).")
+    days_to_expiry: int = Field(description="Calendar days to expiry.")
+
+    # Legs
+    call_leg: StrangleLegAnalysis = Field(description="Short call analysis.")
+    put_leg: StrangleLegAnalysis = Field(description="Short put analysis.")
+
+    # Combined premium
+    total_premium_collected: float = Field(
+        description="Sum of net call + put premiums per share (INR)."
+    )
+    total_premium_collected_total: float = Field(
+        description="Total premium for full lot (INR)."
+    )
+
+    # Breakevens
+    upper_breakeven: float = Field(
+        description="Upper breakeven: call_strike + total_net_premium (INR)."
+    )
+    lower_breakeven: float = Field(
+        description="Lower breakeven: put_strike − total_net_premium (INR)."
+    )
+    profit_zone_width: float = Field(
+        description="Profit zone range: upper_BE − lower_BE (INR)."
+    )
+
+    # P&L bounds
+    max_profit: float = Field(
+        description="Maximum profit if stock stays between strikes at expiry (INR)."
+    )
+    max_loss_upside: str = Field(
+        description="Unlimited loss if stock rallies above upper breakeven."
+    )
+    max_loss_downside: float = Field(
+        description="Maximum downside loss if stock falls to zero (INR)."
+    )
+
+    # Margin
+    estimated_margin_required: float = Field(
+        description="Estimated SPAN margin ~15% of larger leg notional (INR)."
+    )
+    roi_on_margin_pct: float = Field(
+        description="ROI% on estimated margin (total premium / margin × 100)."
+    )
+
+    # Payoff curve
+    payoff: list[PayoffPoint] = Field(
+        description="P&L at expiry across range of stock prices (CMP ± 15%)."
+    )
+
+    timestamp: str = Field(description="UTC timestamp of analysis (ISO 8601).")
