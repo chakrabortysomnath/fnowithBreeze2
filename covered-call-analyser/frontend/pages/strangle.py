@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import requests
 import streamlit as st
+import plotly.graph_objects as go
 
 from auth import check_credentials, get_auth_headers
 from nav import NAV_CSS, brand_header, nav_bar
@@ -351,6 +352,78 @@ with right:
             hide_index=True,
             column_config={"Metric": st.column_config.TextColumn(width="medium")},
         )
+
+        # Payoff chart
+        st.divider()
+        st.markdown('<div class="section-hd">📈 Payoff at Expiry</div>', unsafe_allow_html=True)
+
+        payoff_data = result.get("payoff", [])
+        if payoff_data:
+            # Extract prices and P&L
+            prices = [p["price"] for p in payoff_data]
+            pls = [p["pl"] for p in payoff_data]
+
+            # Create Plotly figure
+            fig = go.Figure()
+
+            # Add P&L line
+            fig.add_trace(
+                go.Scatter(
+                    x=prices,
+                    y=pls,
+                    mode="lines",
+                    name="P&L",
+                    line=dict(color="#58A6FF", width=3),
+                    fill="tozeroy",
+                    fillcolor="rgba(88, 166, 255, 0.15)",
+                    hovertemplate="<b>Stock Price:</b> ₹%{x:,.0f}<br><b>P&L:</b> ₹%{y:,.0f}<extra></extra>",
+                )
+            )
+
+            # Add vertical lines for key price levels
+            cmp = result.get("cmp")
+            upper_be = result.get("upper_breakeven")
+            lower_be = result.get("lower_breakeven")
+            call_strike = result["call_leg"]["strike"]
+            put_strike = result["put_leg"]["strike"]
+
+            lines = [
+                (cmp, "CMP", "#8B949E", "dash"),
+                (call_strike, "Call Strike", "#D0883F", "dot"),
+                (put_strike, "Put Strike", "#D0883F", "dot"),
+                (upper_be, "Upper BE", "#E05252", "solid"),
+                (lower_be, "Lower BE", "#E05252", "solid"),
+            ]
+
+            for price, label, color, dash_style in lines:
+                if price is not None:
+                    fig.add_vline(
+                        x=price,
+                        line_dash=dash_style,
+                        line_color=color,
+                        annotation_text=label,
+                        annotation_position="top",
+                        annotation_font_size=10,
+                        annotation_font_color=color,
+                    )
+
+            # Update layout
+            fig.update_layout(
+                title=f"<b>Short Strangle Payoff — {result['symbol']} {result['expiry_date']}</b>",
+                xaxis_title="Stock Price at Expiry (₹)",
+                yaxis_title="Net P&L (₹)",
+                hovermode="x unified",
+                plot_bgcolor="#161B22",
+                paper_bgcolor="#0D1117",
+                font=dict(family="Inter, Segoe UI, sans-serif", size=12, color="#E6EDF3"),
+                margin=dict(l=8, r=8, t=60, b=36),
+                height=350,
+                xaxis=dict(gridcolor="#30363D"),
+                yaxis=dict(gridcolor="#30363D"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="left", x=0),
+            )
+
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
         # Charges breakdown
         st.divider()
