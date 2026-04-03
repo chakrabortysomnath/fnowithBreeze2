@@ -403,22 +403,23 @@ def _to_breeze_iso(date_str: str) -> str:
     return f"{date_str}T06:00:00.000Z"
 
 
-def get_option_chain(symbol: str, expiry_date: str, breeze: Optional[BreezeConnect] = None) -> list[dict]:
-    """Fetch the call option chain for a symbol and expiry date.
+def get_option_chain(symbol: str, expiry_date: str, right: str = "call", breeze: Optional[BreezeConnect] = None) -> list[dict]:
+    """Fetch the option chain (calls or puts) for a symbol and expiry date.
 
-    Calls breeze.get_option_chain_quotes with right='call' to retrieve all
-    available call strikes for covered call analysis.
+    Calls breeze.get_option_chain_quotes to retrieve all available strikes
+    for the specified right (call or put).
 
     Args:
         symbol:      NSE F&O symbol, e.g. "RELIANCE".
         expiry_date: Expiry date in YYYY-MM-DD format, e.g. "2024-03-28".
+        right:       "call" (CE) or "put" (PE). Defaults to "call".
 
     Returns:
-        List of dicts, each representing one call option contract:
+        List of dicts, each representing one option contract:
         [
             {
                 "strike_price": 2900.0,
-                "option_type": "CE",
+                "option_type": "CE" or "PE",
                 "ltp": 45.50,
                 "iv": 18.3,          # may be None if not returned by Breeze
                 "open_interest": 125000,
@@ -444,7 +445,7 @@ def get_option_chain(symbol: str, expiry_date: str, breeze: Optional[BreezeConne
             exchange_code="NFO",
             product_type="options",
             expiry_date=breeze_expiry,
-            right="call",
+            right=right.lower(),
             strike_price="0",     # 0 = fetch all strikes
         )
     except Exception as exc:
@@ -489,9 +490,10 @@ def get_option_chain(symbol: str, expiry_date: str, breeze: Optional[BreezeConne
             logger.warning(f"Missing strike/ltp in option row for {symbol}: {raw}")
             continue
 
+        option_type = "CE" if right.lower() == "call" else "PE"
         contracts.append({
             "strike_price":   strike,
-            "option_type":    "CE",
+            "option_type":    option_type,
             "ltp":            ltp,
             "iv":             float(iv_raw)  if iv_raw  is not None else None,
             "open_interest":  int(oi_raw)    if oi_raw  is not None else None,

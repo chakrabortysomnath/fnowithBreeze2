@@ -465,6 +465,19 @@ class StrangleLegAnalysis(BaseModel):
     net_premium_total: float = Field(description="Net premium for all shares (INR).")
 
 
+class StrangleOptionChainResponse(BaseModel):
+    """Response model for GET /strangle/option-chain/{symbol}."""
+
+    symbol: str = Field(description="NSE F&O symbol.")
+    expiry_date: str = Field(description="Option expiry (YYYY-MM-DD).")
+    calls: list[OptionContract] = Field(
+        description="List of call (CE) option contracts sorted by strike."
+    )
+    puts: list[OptionContract] = Field(
+        description="List of put (PE) option contracts sorted by strike."
+    )
+
+
 class StrangleAnalyseResponse(BaseModel):
     """Response model for POST /strangle/analyse."""
 
