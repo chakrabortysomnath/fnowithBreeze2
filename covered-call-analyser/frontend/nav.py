@@ -42,6 +42,39 @@ NAV_CSS = """
     border-bottom: 2px solid #58A6FF;
   }
 
+  /* ── st.page_link() nav bar ── */
+  [data-testid="stPageLink"] {
+    padding: 0 !important;
+    background: none !important;
+    border: none !important;
+  }
+  [data-testid="stPageLink-NavLink"] {
+    display: block;
+    padding: 10px 22px;
+    font-size: 14px;
+    font-weight: 600;
+    text-decoration: none !important;
+    color: #8B949E !important;
+    border-bottom: 2px solid transparent;
+    transition: color .15s, border-color .15s;
+    white-space: nowrap;
+  }
+  [data-testid="stPageLink-NavLink"]:hover {
+    color: #58A6FF !important;
+    background: none !important;
+  }
+  [data-testid="stPageLink-NavLink"][aria-current="page"] {
+    color: #E6EDF3 !important;
+    border-bottom: 2px solid #58A6FF;
+    background: none !important;
+  }
+  [data-testid="stHorizontalBlock"]:has([data-testid="stPageLink"]) {
+    border-bottom: 1px solid #30363D;
+    margin-bottom: 20px;
+    margin-top: -10px;
+    gap: 0 !important;
+  }
+
   /* ── Metric cards ── */
   [data-testid="metric-container"] {
     background: #161B22;
@@ -127,19 +160,18 @@ def brand_header(
 
 
 def nav_bar(active: str) -> None:
-    """Render the top navigation bar.
+    """Render the top navigation bar using st.page_link() to preserve session state.
 
-    active: 'analyse' | 'compare' | 'holdings' | 'config' | 'glossary'
+    active: kept for call-site compatibility; Streamlit sets aria-current automatically.
     """
     pages = [
-        ("🔍 Analyse",       "/",          "analyse"),
-        ("⚖️ Compare",       "/compare",   "compare"),
-        ("💼 Holdings",      "/holdings",  "holdings"),
-        ("⚙️ Config",        "/config",    "config"),
-        ("📖 Ready Reckoner", "/glossary", "glossary"),
+        ("🔍 Analyse",        "app.py",            "analyse"),
+        ("⚖️ Compare",        "pages/compare.py",  "compare"),
+        ("💼 Holdings",       "pages/holdings.py", "holdings"),
+        ("⚙️ Config",         "pages/config.py",   "config"),
+        ("📖 Ready Reckoner", "pages/glossary.py", "glossary"),
     ]
-    links = "\n".join(
-        f'<a class="nav-item{" active" if key == active else ""}" href="{href}" target="_self">{label}</a>'
-        for label, href, key in pages
-    )
-    st.markdown(f'<nav class="topnav">{links}</nav>', unsafe_allow_html=True)
+    cols = st.columns(len(pages))
+    for col, (label, page_file, _key) in zip(cols, pages):
+        with col:
+            st.page_link(page_file, label=label, use_container_width=True)
