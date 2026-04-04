@@ -42,12 +42,20 @@ brand_header(
 # ── Session state ─────────────────────────────────────────────────────────────
 
 for key, default in [
-    ("strangle_symbol", ""),
-    ("strangle_expiry", ""),
-    ("strangle_call_strike", 0.0),
-    ("strangle_put_strike", 0.0),
-    ("strangle_result", None),
-    ("strangle_tracker", None),
+    ("strangle_symbol",      ""),
+    ("strangle_expiry",      ""),
+    ("strangle_result",      None),
+    ("strangle_tracker",     None),
+    # Chip-picker state
+    ("selected_ce_strike",   None),
+    ("selected_pe_strike",   None),
+    ("ce_premium",           None),
+    ("pe_premium",           None),
+    ("ce_manual_override",   False),
+    ("pe_manual_override",   False),
+    # Change-detection sentinels
+    ("_strangle_prev_sym",   ""),
+    ("_strangle_prev_exp",   ""),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -130,32 +138,65 @@ def _fetch_option_chain(symbol: str, expiry: str) -> dict:
         return {"calls": [], "puts": []}
 
 
-def _auto_suggest_strikes(calls: list[dict], puts: list[dict], cmp: float) -> tuple[float, float]:
-    """Auto-suggest call strike (4%+ OTM above CMP) and put strike (4%+ OTM below CMP)."""
-    call_strike = None
-    put_strike = None
+def _get_contract(chain: list[dict], strike: float) -> dict | None:
+    """Return the option contract whose strike_price matches, or None."""
+    for c in chain:
+        if c["strike_price"] == strike:
+            return c
+    return None
 
-    # Find nearest call strike at least 4% above CMP
-    target_call = cmp * 1.04
-    for call in calls:
-        if call["strike_price"] >= target_call:
-            call_strike = call["strike_price"]
-            break
 
-    # Find nearest put strike at least 4% below CMP
-    target_put = cmp * 0.96
-    for put in reversed(puts):
-        if put["strike_price"] <= target_put:
-            put_strike = put["strike_price"]
-            break
+def _get_ce_chips(calls: list[dict], cmp: float) -> tuple[list[float], float, float]:
+    """Return (enabled_strikes, atm_strike, suggested_4pct_strike) for the CE chip row.
 
-    # Fallback: use closest strikes if 4% OTM not found
-    if call_strike is None and calls:
-        call_strike = calls[len(calls) // 2]["strike_price"]
-    if put_strike is None and puts:
-        put_strike = puts[len(puts) // 2]["strike_price"]
+    Shows ATM + up to 7 strikes above, but only those strictly above CMP.
+    suggested_4pct is the nearest strike >= 4% above CMP.
+    """
+    if not calls:
+        return [], 0.0, 0.0
 
-    return (call_strike or 0, put_strike or 0)
+    # ATM = closest strike to CMP
+    atm_idx = min(range(len(calls)), key=lambda i: abs(calls[i]["strike_price"] - cmp))
+    atm_strike = calls[atm_idx]["strike_price"]
+
+    # 8 strikes starting at ATM (ATM + 7 above)
+    window = calls[atm_idx : atm_idx + 8]
+
+    # Only enable strikes strictly above CMP
+    enabled = [c["strike_price"] for c in window if c["strike_price"] > cmp]
+
+    # Auto-suggest: first strike >= 4% above CMP
+    target = cmp * 1.04
+    suggested = next((s for s in enabled if s >= target), enabled[0] if enabled else 0.0)
+
+    return enabled, atm_strike, suggested
+
+
+def _get_pe_chips(puts: list[dict], cmp: float) -> tuple[list[float], float, float]:
+    """Return (enabled_strikes, atm_strike, suggested_4pct_strike) for the PE chip row.
+
+    Shows ATM + up to 7 strikes below (descending), only those strictly below CMP.
+    suggested_4pct is the nearest strike <= 4% below CMP.
+    """
+    if not puts:
+        return [], 0.0, 0.0
+
+    # ATM = closest strike to CMP
+    atm_idx = min(range(len(puts)), key=lambda i: abs(puts[i]["strike_price"] - cmp))
+    atm_strike = puts[atm_idx]["strike_price"]
+
+    # 8 strikes from ATM downward (inclusive of ATM)
+    start = max(0, atm_idx - 7)
+    window = puts[start : atm_idx + 1]
+
+    # Only enable strikes strictly below CMP, displayed high→low
+    enabled = [c["strike_price"] for c in reversed(window) if c["strike_price"] < cmp]
+
+    # Auto-suggest: nearest strike <= 4% below CMP
+    target = cmp * 0.96
+    suggested = next((s for s in enabled if s <= target), enabled[0] if enabled else 0.0)
+
+    return enabled, atm_strike, suggested
 
 
 # ── Main UI ───────────────────────────────────────────────────────────────────
@@ -220,86 +261,190 @@ with left:
                 st.metric("Lot Size", f"{lot_size} shares")
             st.divider()
 
-            # Auto-suggest strikes
-            st.markdown('<div class="section-hd">📌 Strike Selection</div>', unsafe_allow_html=True)
             calls = option_chain.get("calls", [])
-            puts = option_chain.get("puts", [])
+            puts  = option_chain.get("puts",  [])
+
+            # ── Change-detection: reset all strike state on new symbol/expiry ──
+            if (st.session_state._strangle_prev_sym != symbol
+                    or st.session_state._strangle_prev_exp != expiry):
+                for _k in ("selected_ce_strike", "selected_pe_strike",
+                           "ce_premium", "pe_premium", "strangle_result"):
+                    st.session_state[_k] = None
+                st.session_state.ce_manual_override = False
+                st.session_state.pe_manual_override = False
+                st.session_state._strangle_prev_sym = symbol
+                st.session_state._strangle_prev_exp = expiry
 
             if calls and puts and cmp:
-                suggested_call, suggested_put = _auto_suggest_strikes(calls, puts, cmp)
+                ce_strikes, atm_call, suggested_ce = _get_ce_chips(calls, cmp)
+                pe_strikes, atm_put,  suggested_pe = _get_pe_chips(puts,  cmp)
 
-                col_call, col_put = st.columns(2)
-                with col_call:
-                    call_strike = st.number_input(
-                        "Call Strike (Sell)",
-                        value=st.session_state.strangle_call_strike or suggested_call,
-                        step=1.0,
-                        key="strangle_call_strike",
-                        help=f"4% OTM suggested: ₹{suggested_call:,.0f}",
-                    )
+                # ── Auto-init on first load ──────────────────────────────────
+                if st.session_state.selected_ce_strike not in ce_strikes:
+                    st.session_state.selected_ce_strike = suggested_ce
+                    st.session_state.ce_premium = (_get_contract(calls, suggested_ce) or {}).get("ltp")
+                    st.session_state.ce_manual_override = False
 
-                with col_put:
-                    put_strike = st.number_input(
-                        "Put Strike (Sell)",
-                        value=st.session_state.strangle_put_strike or suggested_put,
-                        step=1.0,
-                        key="strangle_put_strike",
-                        help=f"4% OTM suggested: ₹{suggested_put:,.0f}",
-                    )
+                if st.session_state.selected_pe_strike not in pe_strikes:
+                    st.session_state.selected_pe_strike = suggested_pe
+                    st.session_state.pe_premium = (_get_contract(puts, suggested_pe) or {}).get("ltp")
+                    st.session_state.pe_manual_override = False
 
-                # Reset to auto-suggested button
-                if st.button("🔄 Reset to Auto-Suggested", use_container_width=True):
-                    st.session_state.strangle_call_strike = suggested_call
-                    st.session_state.strangle_put_strike = suggested_put
+                # ── CE chip row ──────────────────────────────────────────────
+                st.markdown('<div class="section-hd">📌 Strike Selection</div>',
+                            unsafe_allow_html=True)
+                st.markdown("**🟢 CALL (CE) — strike to sell**")
+
+                ce_default = (st.session_state.selected_ce_strike
+                              if not st.session_state.ce_manual_override else None)
+                ce_sel = st.pills(
+                    "CE Strike",
+                    ce_strikes,
+                    default=ce_default,
+                    format_func=lambda s: (
+                        f"ATM · {s:,.0f}" if s == atm_call else f"{s:,.0f}"
+                    ),
+                    key="ce_pills_widget",
+                    label_visibility="collapsed",
+                )
+                if ce_sel is not None and ce_sel != st.session_state.selected_ce_strike:
+                    st.session_state.selected_ce_strike = ce_sel
+                    st.session_state.ce_premium = (_get_contract(calls, ce_sel) or {}).get("ltp")
+                    st.session_state.ce_manual_override = False
                     st.rerun()
+
+                # CE summary card
+                if st.session_state.selected_ce_strike:
+                    _ce = st.session_state.selected_ce_strike
+                    _ce_c = _get_contract(calls, _ce)
+                    _dist_ce = (_ce - cmp) / cmp * 100
+                    _sfx = " (manual)" if st.session_state.ce_manual_override else ""
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("CE Strike", f"₹{_ce:,.0f}{_sfx}")
+                    c2.metric("LTP", _fmt_inr(_ce_c["ltp"]) if _ce_c else "—")
+                    c3.metric("OI", _fmt_int(_ce_c.get("open_interest")) if _ce_c else "—")
+                    c4.metric("From CMP", f"+{_dist_ce:.1f}%")
+
+                # CE manual override
+                with st.expander("✏️ Enter CE strike manually"):
+                    _ce_man_val = float(st.session_state.selected_ce_strike or 0)
+                    _ce_man = st.number_input(
+                        "CE Strike (manual)", value=_ce_man_val, step=50.0,
+                        key="ce_manual_input",
+                    )
+                    if _ce_man > 0:
+                        if _ce_man <= cmp:
+                            st.error(f"CE strike must be above CMP (₹{cmp:,.0f})")
+                        else:
+                            if not _get_contract(calls, _ce_man):
+                                st.warning("Strike not in option chain snapshot — analysis will still proceed")
+                            if st.button("Apply CE Strike", key="apply_ce"):
+                                st.session_state.selected_ce_strike = _ce_man
+                                _c = _get_contract(calls, _ce_man)
+                                st.session_state.ce_premium = _c["ltp"] if _c else None
+                                st.session_state.ce_manual_override = True
+                                st.rerun()
 
                 st.divider()
 
-                # Analyse button
-                if st.button("📊 Analyse", use_container_width=True, type="primary"):
-                    with st.spinner("Analysing strangle position…"):
-                        try:
-                            # Find premiums for selected strikes
-                            call_premium = None
-                            for call in calls:
-                                if call["strike_price"] == call_strike:
-                                    call_premium = call["ltp"]
-                                    break
+                # ── PE chip row ──────────────────────────────────────────────
+                st.markdown("**🔴 PUT (PE) — strike to sell**")
 
-                            put_premium = None
-                            for put in puts:
-                                if put["strike_price"] == put_strike:
-                                    put_premium = put["ltp"]
-                                    break
+                pe_default = (st.session_state.selected_pe_strike
+                              if not st.session_state.pe_manual_override else None)
+                pe_sel = st.pills(
+                    "PE Strike",
+                    pe_strikes,
+                    default=pe_default,
+                    format_func=lambda s: (
+                        f"ATM · {s:,.0f}" if s == atm_put else f"{s:,.0f}"
+                    ),
+                    key="pe_pills_widget",
+                    label_visibility="collapsed",
+                )
+                if pe_sel is not None and pe_sel != st.session_state.selected_pe_strike:
+                    st.session_state.selected_pe_strike = pe_sel
+                    st.session_state.pe_premium = (_get_contract(puts, pe_sel) or {}).get("ltp")
+                    st.session_state.pe_manual_override = False
+                    st.rerun()
 
-                            if call_premium is None:
-                                st.error(
-                                    f"Call strike ₹{call_strike:,.0f} not found. "
-                                    f"Available: ₹{calls[0]['strike_price']:,.0f}–₹{calls[-1]['strike_price']:,.0f}"
-                                )
-                            elif put_premium is None:
-                                st.error(
-                                    f"Put strike ₹{put_strike:,.0f} not found. "
-                                    f"Available: ₹{puts[0]['strike_price']:,.0f}–₹{puts[-1]['strike_price']:,.0f}"
-                                )
-                            else:
-                                # Call backend analysis
-                                r = requests.post(
-                                    f"{BACKEND_URL}/strangle/analyse",
-                                    json={
-                                        "symbol": symbol,
-                                        "expiry_date": expiry,
-                                        "call_strike": call_strike,
-                                        "put_strike": put_strike,
-                                    },
-                                    headers=get_auth_headers(),
-                                    timeout=30,
-                                )
-                                r.raise_for_status()
-                                result = r.json()
-                                st.session_state.strangle_result = result
+                # PE summary card
+                if st.session_state.selected_pe_strike:
+                    _pe = st.session_state.selected_pe_strike
+                    _pe_c = _get_contract(puts, _pe)
+                    _dist_pe = (_pe - cmp) / cmp * 100
+                    _sfx_pe = " (manual)" if st.session_state.pe_manual_override else ""
+                    p1, p2, p3, p4 = st.columns(4)
+                    p1.metric("PE Strike", f"₹{_pe:,.0f}{_sfx_pe}")
+                    p2.metric("LTP", _fmt_inr(_pe_c["ltp"]) if _pe_c else "—")
+                    p3.metric("OI", _fmt_int(_pe_c.get("open_interest")) if _pe_c else "—")
+                    p4.metric("From CMP", f"{_dist_pe:.1f}%")
+
+                # PE manual override
+                with st.expander("✏️ Enter PE strike manually"):
+                    _pe_man_val = float(st.session_state.selected_pe_strike or 0)
+                    _pe_man = st.number_input(
+                        "PE Strike (manual)", value=_pe_man_val, step=50.0,
+                        key="pe_manual_input",
+                    )
+                    if _pe_man > 0:
+                        if _pe_man >= cmp:
+                            st.error(f"PE strike must be below CMP (₹{cmp:,.0f})")
+                        else:
+                            if not _get_contract(puts, _pe_man):
+                                st.warning("Strike not in option chain snapshot — analysis will still proceed")
+                            if st.button("Apply PE Strike", key="apply_pe"):
+                                st.session_state.selected_pe_strike = _pe_man
+                                _p = _get_contract(puts, _pe_man)
+                                st.session_state.pe_premium = _p["ltp"] if _p else None
+                                st.session_state.pe_manual_override = True
                                 st.rerun()
 
+                # ── Summary bar ──────────────────────────────────────────────
+                _sce  = st.session_state.selected_ce_strike
+                _spe  = st.session_state.selected_pe_strike
+                _cprem = st.session_state.ce_premium or 0
+                _pprem = st.session_state.pe_premium or 0
+                _total = _cprem + _pprem
+
+                if _sce and _spe:
+                    st.divider()
+                    st.markdown("**Position Summary**")
+                    st.dataframe(
+                        [
+                            {"Leg": "Sell Put (PE)",  "Strike": f"₹{_spe:,.0f}",
+                             "Premium/share": f"₹{_pprem:,.2f}"},
+                            {"Leg": "Sell Call (CE)", "Strike": f"₹{_sce:,.0f}",
+                             "Premium/share": f"₹{_cprem:,.2f}"},
+                            {"Leg": "Combined",       "Strike": "—",
+                             "Premium/share": f"₹{_total:,.2f}  ·  ₹{_total * lot_size:,.2f} / lot"},
+                        ],
+                        hide_index=True,
+                        use_container_width=True,
+                    )
+
+                st.divider()
+
+                # ── Analyse button ───────────────────────────────────────────
+                _ready = bool(_sce and _spe)
+                if st.button("📊 Analyse", use_container_width=True, type="primary",
+                             disabled=not _ready):
+                    with st.spinner("Analysing strangle position…"):
+                        try:
+                            r = requests.post(
+                                f"{BACKEND_URL}/strangle/analyse",
+                                json={
+                                    "symbol":       symbol,
+                                    "expiry_date":  expiry,
+                                    "call_strike":  _sce,
+                                    "put_strike":   _spe,
+                                },
+                                headers=get_auth_headers(),
+                                timeout=30,
+                            )
+                            r.raise_for_status()
+                            st.session_state.strangle_result = r.json()
+                            st.rerun()
                         except requests.HTTPError as exc:
                             detail = exc.response.json().get("detail", "")
                             st.error(f"Analysis failed {exc.response.status_code}: {detail or str(exc)}")
